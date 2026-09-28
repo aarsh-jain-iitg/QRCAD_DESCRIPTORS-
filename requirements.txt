@@ -1,0 +1,16 @@
+# QRCAD 15-descriptor retrieval pipeline (Python >= 3.11; tested on 3.14)
+numpy==2.4.6
+scipy==1.16.3
+trimesh==4.12.2
+networkx==3.6.1          # trimesh graph / winding repair
+rtree==1.4.1             # trimesh spatial queries; ray fallback without Embree
+embreex==4.4.0           # Embree ray casting for MTS (much faster than the fallback)
+robust_laplacian==1.1.0  # LBE: intrinsic-Delaunay cotangent Laplacian
+gudhi==3.13.0            # PHD: extended persistence
+faiss-cpu==1.15.1        # vector index (numpy backend used if missing)
+matplotlib==3.11.1       # results.png
+tqdm==4.68.3             # build progress
+pytest==9.1.1            # tests
+
+# Optional GPU path for D4 (pipeline.device = "cuda"); not needed on CPU:
+# torch==2.11.0
