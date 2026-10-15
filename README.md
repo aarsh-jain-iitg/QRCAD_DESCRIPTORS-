@@ -80,6 +80,7 @@ is clamped to 41, so compression is only meaningful on larger databases.
 python generate_ss.py                    # every A/B pair in "testing files", with re-seed noise
 python generate_ss.py --pairs R02 R08    # only these pairs
 python generate_ss.py --no-noise         # about 2x faster, no noise column
+python cosine_table.py                   # -> outputs/descriptor_ss/cosine_table.html (double-click to open)
 ```
 Writes `outputs/descriptor_ss/<pair>/<stl>/d<NN>_<name>.png` (one white-background figure per descriptor), `part.png` (shaded picture of the part), `metrics.csv` (cosine, relative change, re-seed noise, same/different per descriptor) and `manifest.json`. Re-runs reuse `vectors.npz` unless `--force`.
 
@@ -111,6 +112,7 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | `src/descriptors/mts_wall_thickness.py` | MTS shape-diameter function |
 | `testing.py` | Compute selected descriptors (1..15) for one STL; scrollable report page served from memory (no files) |
 | `generate_ss.py` | Batch `testing.py` for slides: per-descriptor PNGs + part pictures + A-vs-B metrics for every pair in `testing files` |
+| `cosine_table.py` | Static HTML table from `generate_ss.py` output: rows = A/B pairs (part pictures), columns = 15 descriptors, cells = cosine(A, B) |
 | `src/cache.py` | Content-addressed incremental vector cache (atomic writes) |
 | `src/orchestrator.py` | build / query / evaluate, process pool, fusion |
 | `src/database/__init__.py` | `VectorStore` ABC + backend factory |
@@ -154,3 +156,4 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-09-30 | BLR Phases 1-5 (metrics, augmenter, null model, difference report, Stage-1 candidates, evaluation harness, `scripts/blr_eval_ladder.py`, `scripts/blr_compare.py`); Gate 5 reached, H1 not met (see DOCS/BLR_PLAN.md status). PAF v2 fixes an empty-plane crash. Extraction preconditioning capped at 40k faces (about 3x faster) |
 | 2026-10-01 | BLR augmentation noise 0.01 D -> 0.001 D; Gate 5 rerun: L3 MRR 0.869 vs L1 0.843 (Holm p 0.059), L1r 0.874; DAD, PAF, CURV, T1 still unreliable (eps_b > 0.2) |
 | 2026-10-04 | Added `generate_ss.py`: batch per-descriptor PNGs, part renders, A/B cosine / change / re-seed noise for the descriptor-alignment deck |
+| 2026-10-15 | Added `cosine_table.py` (double-clickable A/B cosine table per descriptor); regenerated `outputs/descriptor_ss` with the current descriptors |

@@ -1,0 +1,109 @@
+# QRCAD retrieval pipeline settings. Paths are relative to the repo root.
+# Descriptor defaults are the values of CAD_Descriptors_Explained.pdf.
+
+[paths]
+dataset_root = "dataset"          # dataset/<dataset_name>/<class_name>/*.stl
+datasets     = ["all"]            # or a list of subfolder names under dataset/
+cache_dir    = "cache"            # where descriptor vectors and the index are cached
+output_dir   = "outputs"          # query reports
+
+[database]
+backend  = "faiss_flat"           # "faiss_flat" | "faiss_hnsw" | "numpy"
+metric   = "cosine"               # "cosine" | "l2" (vectors are unit length, same ranking)
+top_k    = 10
+
+[compression]
+method     = "none"               # "none" | "pca"
+target_dim = 128
+
+[pipeline]
+seed       = 42
+device     = "auto"               # "auto" | "cuda" | "cpu"  (auto = cpu: GPU measured no faster, see README)
+n_samples  = 20000                # PDF: n = 2e4 surface samples
+timeout_s  = 60                   # per STL file
+workers    = 0                    # 0 = min(cpu_count, 8); 1 = serial
+scale_rule = "rms_radius"         # "bbox_diagonal" | "rms_radius" | "unit_area"
+enabled    = ["all"]              # or a list of descriptor names
+fusion     = "weighted_zscore"    # "weighted_zscore" | "rank_fusion"
+
+[pipeline.weights]                # optional per-descriptor weights, default 1.0
+
+[descriptors.d1]                  # d^_i = |p_i - c| / max_j d_j
+bins = 32
+
+[descriptors.d2]                  # d^_ij = |p_i - p_j| / D_diam
+bins  = 32
+pairs = 200000
+
+[descriptors.triangle]            # theta = atan2(|u x w|, u.w), A^ = |u x w| / 2D^2
+bins    = 32
+triples = 200000
+
+[descriptors.d4]                  # V = |det[p2-p1, p3-p1, p4-p1]| / 6
+bins       = 32
+quadruples = 200000
+
+[descriptors.shps]                # P~_l = 4pi/(2l+1) sum_m c_lm^2
+L     = 16
+chunk = 4096
+
+[descriptors.ncf]                 # g(m) = (1/S) sum (n_i.n_j) 1[r^_ij in B_m]
+bins  = 32
+pairs = 200000
+
+[descriptors.lbe]                 # log(lambda_k A / 4 pi k)
+K            = 30
+min_vertices = 1000
+
+[descriptors.dad]                 # theta_e = pi + sigma_e arccos(n_i.n_j)
+bins    = 36
+tau_deg = 20.0
+
+[descriptors.curvature]           # SI = (2/pi) atan2(k1+k2, k1-k2), CV
+si_bins       = 12
+cv_bins       = 8
+radius_frac   = 0.02
+k_max         = 30
+tau_deg       = 20.0
+flat_eps      = 0.1
+cv_max        = 100.0
+min_neighbors = 6
+
+[descriptors.crs_r]               # rho^(a) = |(p - c) x e_a| / D_diam
+bins_axis  = 64
+bins_other = 32
+rho_max    = 0.75
+
+[descriptors.t1]                  # g_c = (2 - chi_c - b_c) / 2 (no parameters)
+
+[descriptors.phd]                 # I(x,y) = sum w(p) exp(-r^2 / 2 sigma^2)
+grid            = 5
+b_max           = 0.5
+p_grid_max      = 0.25
+sigma           = 0.05
+p_max           = 0.1
+loop_threshold  = 0.02
+min_persistence = 1e-9
+
+[descriptors.crs_a]               # |a^_q(m)| / |a^_q(0)|
+n_pool    = 200000
+bands     = 4
+n_phi     = 256
+harmonics = 32
+
+[descriptors.paf]                 # T2 = sum_t w_t n_t n_t^T
+family_tol_deg   = 0.25
+plane_tol        = 1e-4
+max_families     = 64
+top_families     = 6
+tau_deg          = 20.0
+ico_subdivisions = 4
+
+[descriptors.mts]                 # w_i = median_j tau_ij cos angle
+rays     = 16
+cone_deg = 30.0
+eps      = 1e-6
+bins     = 32
+log_lo   = -3.0
+log_hi   = 0.0
+thin     = 0.01

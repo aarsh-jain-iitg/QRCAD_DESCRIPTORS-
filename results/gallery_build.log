@@ -1,0 +1,12 @@
+2026-10-01 09:58:08,475 src.blr.gallery: failed 5758968_7_2_void.stl draw -1: RuntimeError: Factor is exactly singular
+2026-10-01 09:59:27,288 src.blr.gallery: gallery: 100/900 tasks, 144 s
+2026-10-01 10:00:55,643 src.blr.gallery: gallery: 200/900 tasks, 232 s
+2026-10-01 10:03:11,586 src.blr.gallery: gallery: 300/900 tasks, 368 s
+2026-10-01 10:04:54,940 src.blr.gallery: gallery: 400/900 tasks, 471 s
+2026-10-01 10:06:27,474 src.blr.gallery: gallery: 500/900 tasks, 564 s
+2026-10-01 10:07:46,556 src.blr.gallery: gallery: 600/900 tasks, 643 s
+2026-10-01 10:08:56,107 src.blr.gallery: gallery: 700/900 tasks, 713 s
+2026-10-01 10:10:19,698 src.blr.gallery: gallery: 800/900 tasks, 796 s
+2026-10-01 10:11:30,964 src.blr.gallery: gallery: 900/900 tasks, 867 s
+2026-10-01 10:11:31,231 src.blr.gallery: gallery: 299/300 parts complete, 1 failed tasks, 868 s
+2026-10-01 10:11:31,237 blr: gallery ready: 299 parts

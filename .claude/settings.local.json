@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python --version; python -c \"import pypdf; print\\('pypdf', pypdf.__version__\\)\"; python -c \"import fitz; print\\('fitz ok'\\)\"; python -c \"import numpy, scipy, trimesh, sklearn, skimage; print\\('sci ok', numpy.__version__, trimesh.__version__\\)\"; python -c \"import faiss; print\\('faiss', faiss.__version__\\)\"; python -c \"import torch; print\\('torch', torch.__version__, torch.cuda.is_available\\(\\)\\)\"; python -c \"import pytest; print\\('pytest ok'\\)\")",
+      "PowerShell(foreach \\($p in \"scikit-learn\",\"faiss-cpu\",\"pytest\",\"gudhi\",\"robust-laplacian\",\"POT\"\\) { $r = python -m pip install --dry-run --only-binary=:all: $p 2>&1 | Select-String -Pattern \"Would install|ERROR|No matching\" | Select-Object -First 1; \"$p -> $r\" })",
+      "PowerShell(python -m pip install --only-binary=:all: scikit-learn faiss-cpu pytest gudhi robust-laplacian 2>&1 | Select-Object -Last 3)",
+      "PowerShell(python main.py --eval 2>&1 | Select-Object -Last 60)",
+      "PowerShell(\\(Get-ChildItem outputs -Directory | Sort-Object LastWriteTime | Select-Object -Last 1\\).FullName)",
+      "PowerShell(python -m pytest tests/test_descriptors.py -q -x --no-header -p no:cacheprovider 2>&1 | Select-Object -Last 40)"
+    ]
+  }
+}
