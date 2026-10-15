@@ -18,7 +18,7 @@ OUTPUTS:
 
 DEPENDENCIES:
     stdlib      : math
-    third-party : numpy
+    third-party : numpy, torch (optional, device = cuda)
     internal    : descriptors.base, descriptors.crs_r_ring_profile
 
 PHYSICS / DOMAIN CONTEXT:
@@ -29,7 +29,7 @@ PHYSICS / DOMAIN CONTEXT:
     - Samples are area-uniform, so plain counts are area weights.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -39,8 +39,20 @@ import math
 
 import numpy as np
 
-from src.descriptors.base import EPS, Descriptor
+from src.descriptors.base import EPS, Descriptor, resolve_torch_device
 from src.descriptors.crs_r_ring_profile import axis_distance, symmetry_axis
+
+
+# ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
+def _phi_rho_torch(X: np.ndarray, eb: np.ndarray, ec: np.ndarray, es: np.ndarray,
+                   dev) -> tuple[np.ndarray, np.ndarray]:
+    """GPU twin of (azimuth phi [rad], distance to axis e_s [L]) of centred points X (N, 3)."""
+    import torch
+    Xt = torch.as_tensor(X, dtype=torch.float64, device=dev)
+    E = torch.as_tensor(np.stack([eb, ec, es]), dtype=torch.float64, device=dev)
+    phi = torch.atan2(Xt @ E[0], Xt @ E[1])
+    rho = torch.linalg.vector_norm(torch.linalg.cross(Xt, E[2].expand_as(Xt)), dim=1)
+    return phi.cpu().numpy(), rho.cpu().numpy()
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
@@ -64,8 +76,12 @@ class CRSAAngularSpectrum(Descriptor):
         center, w, V = mesh.axes
         s, (b_idx, c_idx) = symmetry_axis(w)
         X = mesh.sample_pool(int(self.params["n_pool"])).points - center
-        phi = np.arctan2(X @ V[:, b_idx], X @ V[:, c_idx])
-        rho = axis_distance(X, V[:, s])
+        dev = resolve_torch_device(self.device)
+        if dev is None:
+            phi = np.arctan2(X @ V[:, b_idx], X @ V[:, c_idx])
+            rho = axis_distance(X, V[:, s])
+        else:
+            phi, rho = _phi_rho_torch(X, V[:, b_idx], V[:, c_idx], V[:, s], dev)
         nb, nphi, M = int(self.params["bands"]), int(self.params["n_phi"]), int(self.params["harmonics"])
         band = np.minimum((rho / max(float(rho.max()), EPS) * nb).astype(np.int64), nb - 1)
         out = np.zeros((nb, M))
@@ -92,4 +108,5 @@ class CRSAAngularSpectrum(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-04  optional GPU path for azimuths / axis distances (device = cuda)
 # ==============================================================================

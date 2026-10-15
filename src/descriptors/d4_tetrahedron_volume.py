@@ -3,10 +3,10 @@
 FILE: d4_tetrahedron_volume.py
 ================================================================================
 PURPOSE:
-    D4 random tetrahedron volume with handedness,
-    CAD_Descriptors_Explained.pdf, Algorithm 4: for S random sample quadruples
-    ordered by distance from the centroid, the signed volume V. Output is the
-    histogram of cbrt(|V| / D_diam^3) plus the skewness of V.
+    D4 random tetrahedron volume (unsigned),
+    CAD_Descriptors_Explained.pdf, Algorithm 4: for S random sample quadruples the
+    volume V = |det[p2-p1, p3-p1, p4-p1]| / 6 (never negative). Output is the
+    histogram of cbrt(V / D_diam^3) plus the skewness of V.
 
 INPUTS:
     - PreparedMesh (default sample pool, centroid, D_diam), seeded rng.
@@ -14,7 +14,7 @@ INPUTS:
     - device: "cuda" runs the gather / triple product in torch float64.
 
 OUTPUTS:
-    - float32 vector, shape (bins+1,): [Hellinger hist | gamma_1(V)].
+    - float32 vector, shape (bins+1,): [Hellinger hist | gamma_1(V)], gamma_1 of the unsigned volumes.
 
 DEPENDENCIES:
     stdlib      : math
@@ -22,9 +22,9 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - V = det[p2-p1, p3-p1, p4-p1]/6 with p1..p4 sorted by |p - c|.
-    - det(RM) = det(M) for rotations; a mirror flips the sign of V, so
-      gamma_1 flips sign: D4 is deliberately NOT reflection invariant.
+    - V = |det[p2-p1, p3-p1, p4-p1]|/6: a volume is never negative, and the
+      absolute value makes D4 invariant to rotation and reflection (v1 kept the
+      sign as handedness and was not mirror invariant).
     - Histogram range [0, (6 sqrt2)^(-1/3)]: the regular tetrahedron of
       edge D_diam is the largest.
     - The CPU and GPU paths use the same indices and float64 maths; they
@@ -32,7 +32,7 @@ PHYSICS / DOMAIN CONTEXT:
       on a bin edge could differ.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -43,50 +43,43 @@ import math
 import numpy as np
 
 from src.descriptors.base import (ALL_INVARIANCES, Descriptor, distinct_tuples,
-                                  hellinger_hist, resolve_torch_device, skewness)
+                                  hellinger_hist, resolve_torch_device, skewness,
+                                  torch_gather)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 CBRT_VOL_MAX = (6.0 * math.sqrt(2.0)) ** (-1.0 / 3.0)   # [-] upper histogram edge
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
-def _signed_volumes_numpy(P: np.ndarray, c: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    """Signed volumes of ordered tetrahedra [L^3], shape (S,)."""
+def _volumes_numpy(P: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """Volumes of tetrahedra [L^3], shape (S,), all >= 0."""
     # points: S = 2e5 random quadruples (params.quadruples) drawn from n = 2e4 surface samples (pipeline.n_samples)
     q = P[idx]                                            # (S, 4, 3)
-    r = np.linalg.norm(q - c, axis=2)
-    order = np.argsort(r, axis=1, kind="stable")
-    q = np.take_along_axis(q, order[:, :, None], axis=1)
     e1, e2, e3 = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0], q[:, 3] - q[:, 0]
-    # D4 eq.(9): V = ((p2-p1) x (p3-p1)) . (p4-p1) / 6
-    return np.einsum("ij,ij->i", np.cross(e1, e2), e3) / 6.0
+    # D4 eq.(9): V = |((p2-p1) x (p3-p1)) . (p4-p1)| / 6
+    return np.abs(np.einsum("ij,ij->i", np.cross(e1, e2), e3)) / 6.0
 
 
-def _signed_volumes_torch(P: np.ndarray, c: np.ndarray, idx: np.ndarray, dev) -> np.ndarray:
-    """GPU twin of _signed_volumes_numpy (float64, stable sort)."""
+def _volumes_torch(P: np.ndarray, idx: np.ndarray, dev) -> np.ndarray:
+    """GPU twin of _volumes_numpy (float64)."""
     import torch
-    Pt = torch.as_tensor(P, dtype=torch.float64, device=dev)
-    ct = torch.as_tensor(c, dtype=torch.float64, device=dev)
-    q = Pt[torch.as_tensor(idx, device=dev)]
-    r = torch.linalg.norm(q - ct, dim=2)
-    order = torch.argsort(r, dim=1, stable=True)
-    q = torch.take_along_dim(q, order[:, :, None], dim=1)
+    q = torch_gather(P, idx, dev)
     e1, e2, e3 = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0], q[:, 3] - q[:, 0]
-    V = (torch.linalg.cross(e1, e2) * e3).sum(dim=1) / 6.0
+    V = (torch.linalg.cross(e1, e2) * e3).sum(dim=1).abs() / 6.0
     return V.cpu().numpy()
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class D4TetrahedronVolume(Descriptor):
-    """D4: random tetrahedron volume with handedness."""
-    # p1..p4 ordered by |p - c|;  V = det[p2 - p1, p3 - p1, p4 - p1] / 6
-    # V^ = |V| / D_diam^3 in [0, 1/(6 sqrt2)]
+    """D4: random tetrahedron volume (unsigned)."""
+    # V = |det[p2 - p1, p3 - p1, p4 - p1]| / 6
+    # V^ = V / D_diam^3 in [0, 1/(6 sqrt2)]
     # F_D4 = [hist32({cbrt V^}; [0, (6 sqrt2)^(-1/3)]), gamma_1({V / sigma_V})]
 
     name = "d4"
-    version = "1"
+    version = "2"
     metric = "hellinger"
-    invariances = ALL_INVARIANCES - {"reflection"}
+    invariances = ALL_INVARIANCES
     defaults = {"bins": 32, "quadruples": 200_000}
 
     def _setup(self) -> None:
@@ -98,11 +91,11 @@ class D4TetrahedronVolume(Descriptor):
         idx = distinct_tuples(rng, len(P), int(self.params["quadruples"]), 4)
         dev = resolve_torch_device(self.device)
         if dev is None:
-            V = _signed_volumes_numpy(P, mesh.centroid, idx)
+            V = _volumes_numpy(P, idx)
         else:
-            V = _signed_volumes_torch(P, mesh.centroid, idx, dev)
-        # D4 eq.(10): hist of cbrt(|V| / D_diam^3), plus gamma_1(V / sigma_V)
-        v_hat = np.cbrt(np.abs(V) / mesh.diameter ** 3)
+            V = _volumes_torch(P, idx, dev)
+        # D4 eq.(10): hist of cbrt(V / D_diam^3), plus gamma_1(V / sigma_V)
+        v_hat = np.cbrt(V / mesh.diameter ** 3)
         h = hellinger_hist(v_hat, self.n_hist, 0.0, CBRT_VOL_MAX)
         return np.append(h, skewness(V))
 
@@ -110,7 +103,7 @@ class D4TetrahedronVolume(Descriptor):
 # END OF FILE: d4_tetrahedron_volume.py
 # ==============================================================================
 # SUMMARY:
-#   D4 ordered-tetrahedron volume histogram + handedness skewness (33 values).
+#   D4 tetrahedron volume histogram + skewness (unsigned volumes) (33 values).
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.d4_tetrahedron_volume import D4TetrahedronVolume
@@ -122,4 +115,6 @@ class D4TetrahedronVolume(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-09-30  v2: unsigned volumes, no handedness; now mirror invariant
+#   2026-10-04  GPU twin uses the shared base.torch_gather
 # ==============================================================================

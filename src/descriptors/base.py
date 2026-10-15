@@ -5,7 +5,8 @@ FILE: base.py
 PURPOSE:
     Abstract Descriptor interface shared by all fifteen shape descriptors, plus
     the small numeric helpers they all need (Hellinger histograms, distinct
-    random index tuples, safe normalisation, optional torch device math).
+    random index tuples, safe normalisation, optional torch device math and
+    the GPU gather of index tuples).
     Keeping these here means every descriptor file contains only its own math.
 
 INPUTS:
@@ -27,7 +28,7 @@ PHYSICS / DOMAIN CONTEXT:
       so the inner product of two blocks is the Bhattacharyya similarity.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -176,6 +177,27 @@ def soft_hellinger_hist(values: np.ndarray, bins: int, lo: float, hi: float,
     return hellinger(h)
 
 
+def torch_gather(P: np.ndarray, idx: np.ndarray, dev: Any) -> Any:
+    """
+    Upload points and gather index tuples on the GPU, in float64.
+
+    Parameters
+    ----------
+    P : np.ndarray, shape (n, 3)
+        Points [L].
+    idx : np.ndarray, shape (S, k), int
+        Index tuples (drawn on the CPU so both devices see the same tuples).
+    dev : torch.device
+
+    Returns
+    -------
+    torch.Tensor, shape (S, k, 3), float64
+    """
+    import torch
+    Pt = torch.as_tensor(P, dtype=torch.float64, device=dev)
+    return Pt[torch.as_tensor(idx, device=dev)]
+
+
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class DescriptorError(ValueError):
     """Raised when a mesh cannot produce a valid vector for a descriptor."""
@@ -256,4 +278,5 @@ class Descriptor(ABC):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-04  torch_gather: shared GPU gather for the tuple descriptors
 # ==============================================================================

@@ -17,7 +17,7 @@ OUTPUTS:
 
 DEPENDENCIES:
     stdlib      : (none)
-    third-party : numpy
+    third-party : numpy, torch (optional, device = cuda)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
@@ -25,7 +25,7 @@ PHYSICS / DOMAIN CONTEXT:
     - sum_m g(m) = |E n|^2 = 0 for a closed part.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -33,7 +33,17 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.descriptors.base import Descriptor, distinct_tuples
+from src.descriptors.base import Descriptor, distinct_tuples, resolve_torch_device, torch_gather
+
+
+# ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
+def _dist_dot_torch(P: np.ndarray, Nn: np.ndarray, idx: np.ndarray,
+                    dev) -> tuple[np.ndarray, np.ndarray]:
+    """GPU twin of (|p_i - p_j| [L], n_i . n_j [-]) for index pairs idx (S, 2), float64."""
+    import torch
+    q, nq = torch_gather(P, idx, dev), torch_gather(Nn, idx, dev)
+    r = torch.linalg.vector_norm(q[:, 0] - q[:, 1], dim=1)
+    return r.cpu().numpy(), (nq[:, 0] * nq[:, 1]).sum(dim=1).cpu().numpy()
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
@@ -55,12 +65,16 @@ class NCFNormalCorrelation(Descriptor):
     def _compute(self, mesh, rng: np.random.Generator) -> np.ndarray:
         s = mesh.samples
         idx = distinct_tuples(rng, len(s.points), int(self.params["pairs"]), 2)
-        i, j = idx[:, 0], idx[:, 1]
-        r = np.linalg.norm(s.points[i] - s.points[j], axis=1) / mesh.diameter
-        m = np.clip((r * self.dim).astype(np.int64), 0, self.dim - 1)
+        dev = resolve_torch_device(self.device)
+        if dev is None:
+            i, j = idx[:, 0], idx[:, 1]
+            r = np.linalg.norm(s.points[i] - s.points[j], axis=1)
+            dots = np.einsum("ij,ij->i", s.normals[i], s.normals[j])
+        else:
+            r, dots = _dist_dot_torch(s.points, s.normals, idx, dev)
+        m = np.clip((r / mesh.diameter * self.dim).astype(np.int64), 0, self.dim - 1)
         # eq.(13): g(m) = (1/S) sum (n_i . n_j) 1[r_ij in B_m]
-        g = np.bincount(m, weights=np.einsum("ij,ij->i", s.normals[i], s.normals[j]),
-                        minlength=self.dim)
+        g = np.bincount(m, weights=dots, minlength=self.dim)
         return g / len(idx)
 
 # ==============================================================================
@@ -78,4 +92,5 @@ class NCFNormalCorrelation(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-04  optional GPU path for pair distances / normal dots (device = cuda)
 # ==============================================================================

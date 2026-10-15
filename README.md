@@ -19,6 +19,12 @@ python -m pip install -r requirements.txt     # Python >= 3.11 (tested on 3.14, 
 (a NumPy backend is used if it is missing); `torch` is only needed for
 `pipeline.device = "cuda"`.
 
+## Web app
+```bash
+python app.py      # opens http://127.0.0.1:5000
+```
+Add datasets (folder of `class/part.stl`, STL files or zip) → cache builds in the background → drop one STL to search. Each of the top-10 hits shows the descriptors that make it similar (green), those where it differs (red), and all 15 per-descriptor z-scores.
+
 ## Usage
 ```bash
 python main.py                                   # build/refresh cache, query QUERY_FILE, write report
@@ -69,6 +75,14 @@ Leave-one-out on 42 models, 7 classes (`python main.py --rebuild --eval`, 2026-0
 
 PCA to the data rank loses nothing here; with only 42 models `target_dim = 128`
 is clamped to 41, so compression is only meaningful on larger databases.
+### Descriptor screenshots for slides
+```bash
+python generate_ss.py                    # every A/B pair in "testing files", with re-seed noise
+python generate_ss.py --pairs R02 R08    # only these pairs
+python generate_ss.py --no-noise         # about 2x faster, no noise column
+```
+Writes `outputs/descriptor_ss/<pair>/<stl>/d<NN>_<name>.png` (one white-background figure per descriptor), `part.png` (shaded picture of the part), `metrics.csv` (cosine, relative change, re-seed noise, same/different per descriptor) and `manifest.json`. Re-runs reuse `vectors.npz` unless `--force`.
+
 A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search.
 
 ## File Map
@@ -83,7 +97,7 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | `src/descriptors/d1_radial_distance.py` | D1 |
 | `src/descriptors/d2_pairwise_distance.py` | D2 |
 | `src/descriptors/triangle_a3_d3.py` | A3 + D3 |
-| `src/descriptors/d4_tetrahedron_volume.py` | D4 + handedness, optional GPU path |
+| `src/descriptors/d4_tetrahedron_volume.py` | D4 (unsigned volumes), optional GPU path |
 | `src/descriptors/shps_orientation_spectrum.py` | SHPS |
 | `src/descriptors/ncf_normal_correlation.py` | NCF |
 | `src/descriptors/lbe_laplace_beltrami.py` | LBE / ShapeDNA |
@@ -96,6 +110,7 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | `src/descriptors/paf_planar_families.py` | PAF |
 | `src/descriptors/mts_wall_thickness.py` | MTS shape-diameter function |
 | `testing.py` | Compute selected descriptors (1..15) for one STL; scrollable report page served from memory (no files) |
+| `generate_ss.py` | Batch `testing.py` for slides: per-descriptor PNGs + part pictures + A-vs-B metrics for every pair in `testing files` |
 | `src/cache.py` | Content-addressed incremental vector cache (atomic writes) |
 | `src/orchestrator.py` | build / query / evaluate, process pool, fusion |
 | `src/database/__init__.py` | `VectorStore` ABC + backend factory |
@@ -113,7 +128,7 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 ## Physics / Domain Assumptions
 - Input is an STL triangle mesh in any length unit; every descriptor is dimensionless
   (lengths / D∅, areas / D∅² or A, curvature × √A), so translation, rotation and
-  scale drop out; all blocks but D4 are also mirror invariant (D4 encodes handedness).
+  scale drop out; all blocks are also mirror invariant.
 - Surfaces are sampled uniformly by area (PDF eq. 2), n = 2·10⁴, seeded: the same
   file + config gives a bit-identical vector.
 - Normals are assumed outward after repair (`fix_normals(multibody=False)` keeps
@@ -133,3 +148,9 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-09-25 | Added `testing.py`: interactive per-descriptor inspection/plots for one STL |
 | 2026-09-25 | `testing.py`: per-block panels on physical axes + single scrollable local report page |
 | 2026-09-27 | `testing.py`: `folder_mode` bool, one report tab per STL in `input_folder` |
+| 2026-09-30 | Web app (`app.py`, `static/index.html`): dataset upload, background cache build, single-STL search, top-k with per-descriptor why-similar / why-different; `Hit.per_descriptor` gains `z` |
+| 2026-09-30 | D4 v2: tetrahedron volumes are unsigned (never negative); handedness dropped, D4 is now mirror invariant; removed handedness test |
+| 2026-09-30 | BLR Phase 0 (`src/blr/`: config, 15-block registry, quality stats, mesh preconditioning, `extract_blocks` / `quality_stats`, `tests/test_blocks.py`; plan in `DOCS/BLR_PLAN.md`). Web app: per-descriptor bars now show cosine similarity coloured by z-score |
+| 2026-09-30 | BLR Phases 1-5 (metrics, augmenter, null model, difference report, Stage-1 candidates, evaluation harness, `scripts/blr_eval_ladder.py`, `scripts/blr_compare.py`); Gate 5 reached, H1 not met (see DOCS/BLR_PLAN.md status). PAF v2 fixes an empty-plane crash. Extraction preconditioning capped at 40k faces (about 3x faster) |
+| 2026-10-01 | BLR augmentation noise 0.01 D -> 0.001 D; Gate 5 rerun: L3 MRR 0.869 vs L1 0.843 (Holm p 0.059), L1r 0.874; DAD, PAF, CURV, T1 still unreliable (eps_b > 0.2) |
+| 2026-10-04 | Added `generate_ss.py`: batch per-descriptor PNGs, part renders, A/B cosine / change / re-seed noise for the descriptor-alignment deck |

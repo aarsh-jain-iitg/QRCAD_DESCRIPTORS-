@@ -17,7 +17,7 @@ OUTPUTS:
 
 DEPENDENCIES:
     stdlib      : math
-    third-party : numpy, scipy.special.sph_harm_y_all
+    third-party : numpy, scipy.special.sph_harm_y_all, torch (optional, device = cuda)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
@@ -28,12 +28,16 @@ PHYSICS / DOMAIN CONTEXT:
     - sph_harm_y_all evaluates all (l, m) by recurrence, which the
       Complexity PDF requires (27x faster than per-harmonic calls).
       Complex and real harmonics give the same band power.
+    - GPU path (device = cuda): real orthonormal harmonics from the fully
+      normalised associated-Legendre recurrence, all faces at once in
+      float64 (no chunking). Matches the scipy path to ~1e-12; it replaces
+      scipy's ~0.1 ms/face cost, which dominates on fine meshes.
     - Reference: cube P~_4 = 0.583, P~_6 = 0.125, P~_8 = 0.516; ball ~0.
     - PDF prose mentions l = 2,4,6,...; the formula and the stated length 15
       use every l = 2..16, which is what is implemented.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -44,7 +48,54 @@ import math
 import numpy as np
 from scipy.special import sph_harm_y_all
 
-from src.descriptors.base import Descriptor
+from src.descriptors.base import Descriptor, resolve_torch_device
+
+
+# ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
+def _band_powers_torch(n: np.ndarray, w: np.ndarray, L: int, dev) -> np.ndarray:
+    """
+    GPU twin of the band powers P~_0 .. P~_L, float64.
+
+    Parameters
+    ----------
+    n : np.ndarray, shape (F, 3)
+        Unit face normals [-].
+    w : np.ndarray, shape (F,)
+        Area weights, summing to 1 [-].
+    L : int
+        Band limit.
+    dev : torch.device
+
+    Returns
+    -------
+    np.ndarray, shape (L+1,)
+        P~_l = 4 pi / (2l+1) sum_m |c_lm|^2.
+    """
+    import torch
+    nt = torch.as_tensor(n, dtype=torch.float64, device=dev)
+    wt = torch.as_tensor(w, dtype=torch.float64, device=dev)
+    x = nt[:, 2].clamp(-1.0, 1.0)                           # cos(theta)
+    sx = torch.sqrt((1.0 - x * x).clamp_min(0.0))           # sin(theta)
+    phi = torch.atan2(nt[:, 1], nt[:, 0])
+    power = torch.zeros(L + 1, dtype=torch.float64, device=dev)
+    pmm = torch.full_like(x, 1.0 / math.sqrt(4.0 * math.pi))  # normalised P_0^0
+    for m in range(L + 1):
+        if m > 0:
+            pmm = math.sqrt((2 * m + 1) / (2 * m)) * sx * pmm
+        rows = [pmm]
+        if m < L:
+            rows.append(math.sqrt(2 * m + 3) * x * pmm)
+        for ell in range(m + 2, L + 1):
+            # normalised recurrence: P_l^m = a (x P_{l-1}^m - b P_{l-2}^m)
+            a = math.sqrt((4 * ell * ell - 1) / (ell * ell - m * m))
+            b = math.sqrt(((ell - 1) ** 2 - m * m) / (4 * (ell - 1) ** 2 - 1))
+            rows.append(a * (x * rows[-1] - b * rows[-2]))
+        Pm = torch.stack(rows, dim=1)                       # (F, L-m+1), l = m..L
+        # eq.(11): |c_lm|^2 = (sum w P cos m phi)^2 + (sum w P sin m phi)^2; m and -m alike
+        c2 = ((wt * torch.cos(m * phi)) @ Pm) ** 2 + ((wt * torch.sin(m * phi)) @ Pm) ** 2
+        power[m:] += c2 if m == 0 else 2.0 * c2
+    ell = torch.arange(L + 1, dtype=torch.float64, device=dev)
+    return (4.0 * math.pi / (2 * ell + 1) * power).cpu().numpy()
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
@@ -67,6 +118,9 @@ class SHPSOrientationSpectrum(Descriptor):
         L = int(self.params["L"])
         n = mesh.face_normals
         w = mesh.face_areas / mesh.area
+        dev = resolve_torch_device(self.device)
+        if dev is not None:
+            return _band_powers_torch(n, w, L, dev)[2:]
         theta = np.arccos(np.clip(n[:, 2], -1.0, 1.0))      # polar angle
         phi = np.arctan2(n[:, 1], n[:, 0])                  # azimuth
         c = np.zeros((L + 1, 2 * L + 1), dtype=np.complex128)
@@ -95,4 +149,5 @@ class SHPSOrientationSpectrum(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-04  optional GPU path (Legendre recurrence in torch, device = cuda)
 # ==============================================================================

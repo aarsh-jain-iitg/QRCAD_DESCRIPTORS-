@@ -20,7 +20,7 @@ OUTPUTS:
 
 DEPENDENCIES:
     stdlib      : math
-    third-party : numpy, scipy.spatial.cKDTree, trimesh
+    third-party : numpy, scipy.spatial.cKDTree, trimesh, torch (optional, device = cuda)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
@@ -40,9 +40,12 @@ PHYSICS / DOMAIN CONTEXT:
       opens a family and claims every unassigned face with
       |n.m| >= cos(0.25 deg). This equals the PDF's greedy scan.
     - Plane offsets h = b.m / D_diam, clustered in 1-D with tolerance 1e-4.
+    - GPU path (device = cuda): T2, T4 = M^T W M with M = n (x) n, and the
+      icosphere cell as argmax n.v (= nearest vertex for unit vectors).
+      The greedy family loop stays on the CPU (sequential, <= 64 steps).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -54,13 +57,18 @@ import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
 
-from src.descriptors.base import Descriptor, angle_between_lines_deg
+from src.descriptors.base import Descriptor, angle_between_lines_deg, resolve_torch_device
+
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+CELL_CHUNK = 8192           # [-] GPU normals per icosphere-assignment batch (8192 x 2562 float64 = 168 MB)
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _plane_stats(h: np.ndarray, tol: float) -> tuple[int, float]:
     """Number of distinct planes and gap CV from 1-D offsets h (dimensionless)."""
     # points: none sampled; all mesh faces (normals, areas, centres)
+    if len(h) == 0:                       # empty family (seed face was not planar)
+        return 0, 0.0
     hs = np.sort(h)
     starts = np.concatenate([[0], np.nonzero(np.diff(hs) > tol)[0] + 1])
     planes = np.add.reduceat(hs, starts) / np.diff(np.append(starts, len(hs)))
@@ -72,6 +80,40 @@ def _plane_stats(h: np.ndarray, tol: float) -> tuple[int, float]:
     return Ns, float(gaps.std() / mu) if mu > 0 else 0.0
 
 
+def _moments_cells_torch(N: np.ndarray, w: np.ndarray, ico: np.ndarray,
+                        dev) -> tuple[np.ndarray, float, np.ndarray]:
+    """
+    GPU twin of (T2, I4, icosphere cell of each normal), float64.
+
+    Parameters
+    ----------
+    N : np.ndarray, shape (F, 3)
+        Unit face normals [-].
+    w : np.ndarray, shape (F,)
+        Area weights [-].
+    ico : np.ndarray, shape (G, 3)
+        Unit icosphere vertices.
+    dev : torch.device
+
+    Returns
+    -------
+    T2 : np.ndarray, shape (3, 3)
+    I4 : float
+        |T4|_F^2.
+    cell : np.ndarray, shape (F,), int64
+    """
+    import torch
+    Nt = torch.as_tensor(N, dtype=torch.float64, device=dev)
+    wt = torch.as_tensor(w, dtype=torch.float64, device=dev)
+    Vt = torch.as_tensor(ico, dtype=torch.float64, device=dev)
+    T2 = (Nt * wt[:, None]).T @ Nt
+    M = (Nt[:, :, None] * Nt[:, None, :]).reshape(-1, 9)     # n (x) n
+    T4 = (M * wt[:, None]).T @ M                              # T4_ijkl as (ij, kl)
+    cell = torch.cat([torch.argmax(Nt[s:s + CELL_CHUNK] @ Vt.T, dim=1)
+                      for s in range(0, len(Nt), CELL_CHUNK)])
+    return T2.cpu().numpy(), float((T4 ** 2).sum()), cell.cpu().numpy()
+
+
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class PAFPlanarFamilies(Descriptor):
     """PAF: planar face families and normal moments."""
@@ -80,7 +122,7 @@ class PAFPlanarFamilies(Descriptor):
     # I4 = sum_{s,t} w_s w_t (n_s . n_t)^4
 
     name = "paf"
-    version = "1"
+    version = "2"
     metric = "l2"
     defaults = {"family_tol_deg": 0.25, "plane_tol": 1e-4, "max_families": 64,
                 "top_families": 6, "tau_deg": 20.0, "ico_subdivisions": 4}
@@ -94,16 +136,21 @@ class PAFPlanarFamilies(Descriptor):
         N = mesh.face_normals
         w = mesh.face_areas / mesh.area
 
-        # eq.(28): T2 and Westin coefficients
-        T2 = np.einsum("t,ti,tj->ij", w, N, N)
+        ico = trimesh.creation.icosphere(subdivisions=int(p["ico_subdivisions"]))
+        dev = resolve_torch_device(self.device)
+        if dev is None:
+            # eq.(28): T2 = sum w n n^T
+            T2 = np.einsum("t,ti,tj->ij", w, N, N)
+            # I4 = |T4|_F^2, T4 = sum w n(x)n(x)n(x)n
+            T4 = np.einsum("t,ti,tj,tk,tl->ijkl", w, N, N, N, N, optimize=True)
+            I4 = float((T4 ** 2).sum())
+            _, cell = cKDTree(ico.vertices).query(N)
+        else:
+            T2, I4, cell = _moments_cells_torch(N, w, ico.vertices, dev)
+        # eq.(28): Westin coefficients
         L = np.sort(np.linalg.eigvalsh(T2))[::-1]
         cl, cp, cs = L[0] - L[1], 2.0 * (L[1] - L[2]), 3.0 * L[2]
-        # I4 = |T4|_F^2, T4 = sum w n(x)n(x)n(x)n
-        T4 = np.einsum("t,ti,tj,tk,tl->ijkl", w, N, N, N, N, optimize=True)
-        I4 = float((T4 ** 2).sum())
 
-        ico = trimesh.creation.icosphere(subdivisions=int(p["ico_subdivisions"]))
-        _, cell = cKDTree(ico.vertices).query(N)
         q = np.bincount(cell, weights=w, minlength=len(ico.vertices))
         q = q[q > 0]
         H = float(-(q * np.log(q)).sum() / math.log(len(ico.vertices)))
@@ -158,4 +205,6 @@ class PAFPlanarFamilies(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-09-30  v2: empty plane list no longer crashes (np.add.reduceat on an empty array)
+#   2026-10-04  optional GPU path for T2 / T4 / icosphere cells (device = cuda)
 # ==============================================================================

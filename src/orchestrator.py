@@ -536,8 +536,8 @@ def query(path: Path, cfg: Config, top_k: int | None = None) -> QueryResult:
         hits.append(Hit(
             rank=r, id=state.ids[i], label=state.labels[i], path=state.paths[i], score=float(s),
             exact_match=state.shas[i] == qsha,
-            per_descriptor={n: {"similarity": float(sims[n][i]), "rank": int(ranks[n][i])}
-                            for n in state.names},
+            per_descriptor={n: {"similarity": float(sims[n][i]), "rank": int(ranks[n][i]),
+                                "z": float(zs[n][i])} for n in state.names},
             top_descriptors=sorted(contrib, key=contrib.get, reverse=True)[:3]))
     return QueryResult(query_path=str(path), query_sha256=qsha,
                        query_in_database=qsha in set(state.shas), fusion=cfg.fusion,

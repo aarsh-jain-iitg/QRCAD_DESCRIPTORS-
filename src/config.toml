@@ -39,7 +39,7 @@ pairs = 200000
 bins    = 32
 triples = 200000
 
-[descriptors.d4]                  # V = det[p2-p1, p3-p1, p4-p1] / 6
+[descriptors.d4]                  # V = |det[p2-p1, p3-p1, p4-p1]| / 6
 bins       = 32
 quadruples = 200000
 

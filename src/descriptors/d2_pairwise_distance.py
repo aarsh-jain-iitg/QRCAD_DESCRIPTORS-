@@ -16,7 +16,7 @@ OUTPUTS:
 
 DEPENDENCIES:
     stdlib      : (none)
-    third-party : numpy
+    third-party : numpy, torch (optional, device = cuda)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
@@ -24,7 +24,7 @@ PHYSICS / DOMAIN CONTEXT:
       D_diam cancels scale. Sphere reference density p(d) = d/(2R^2).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-04
 ================================================================================
 """
 
@@ -32,7 +32,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.descriptors.base import Descriptor, distinct_tuples, hellinger_hist
+from src.descriptors.base import (Descriptor, distinct_tuples, hellinger_hist,
+                                  resolve_torch_device, torch_gather)
+
+
+# ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
+def _distances_torch(P: np.ndarray, idx: np.ndarray, dev) -> np.ndarray:
+    """GPU twin of |p_i - p_j| for index pairs idx (S, 2) [L], float64, shape (S,)."""
+    import torch
+    q = torch_gather(P, idx, dev)
+    return torch.linalg.vector_norm(q[:, 0] - q[:, 1], dim=1).cpu().numpy()
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
@@ -53,7 +62,11 @@ class D2PairwiseDistance(Descriptor):
         P = mesh.samples.points
         idx = distinct_tuples(rng, len(P), int(self.params["pairs"]), 2)
         # D2 eq.(6): d^_ij = |p_i - p_j| / D_diam
-        d = np.linalg.norm(P[idx[:, 0]] - P[idx[:, 1]], axis=1) / mesh.diameter
+        dev = resolve_torch_device(self.device)
+        if dev is None:
+            d = np.linalg.norm(P[idx[:, 0]] - P[idx[:, 1]], axis=1) / mesh.diameter
+        else:
+            d = _distances_torch(P, idx, dev) / mesh.diameter
         return hellinger_hist(d, self.dim, 0.0, 1.0)
 
 # ==============================================================================
@@ -71,4 +84,5 @@ class D2PairwiseDistance(Descriptor):
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-04  optional GPU path for the pair distances (device = cuda)
 # ==============================================================================

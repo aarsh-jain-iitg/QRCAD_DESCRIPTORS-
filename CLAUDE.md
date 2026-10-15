@@ -55,7 +55,7 @@ multiplied by √w, concatenated and L2-normalised (PDF eq. 31).
 | 1 | d1 | d1_radial_distance.py | 32 | 32 | hellinger | T R S M | d̂ᵢ = ‖pᵢ − c‖ / maxⱼ dⱼ | n = 2e4 samples |
 | 2 | d2 | d2_pairwise_distance.py | 32 | 32 | hellinger | T R S M | d̂ᵢⱼ = ‖pᵢ − pⱼ‖ / D∅ | S = 2e5 pairs of n = 2e4 |
 | 3 | triangle | triangle_a3_d3.py | 64 | 64 | hellinger | T R S M | θ = atan2(‖u×w‖, u·w); Â = ½‖u×w‖ / D∅² | S = 2e5 triples of n = 2e4 |
-| 4 | d4 | d4_tetrahedron_volume.py | 33 | 32 | hellinger | T R S (not M) | V = ⅙ det[p₂−p₁, p₃−p₁, p₄−p₁]; [hist(∛(\|V\|/D∅³)), γ₁(V)] | S = 2e5 quadruples of n = 2e4 |
+| 4 | d4 | d4_tetrahedron_volume.py | 33 | 32 | hellinger | T R S M | V = ⅙ \|det[p₂−p₁, p₃−p₁, p₄−p₁]\|; [hist(∛(V/D∅³)), γ₁(V)] | S = 2e5 quadruples of n = 2e4 |
 | 5 | shps | shps_orientation_spectrum.py | 15 | 0 | l2 | T R S M | P̃ₗ = 4π/(2ℓ+1) Σₘ c²ₗₘ, ℓ = 2..16 | all faces (exact) |
 | 6 | ncf | ncf_normal_correlation.py | 32 | 0 | l2 | T R S M | g(m) = (1/S) Σ (n̂ᵢ·n̂ⱼ) 1[r̂ᵢⱼ ∈ Bₘ] | S = 2e5 pairs of n = 2e4 |
 | 7 | lbe | lbe_laplace_beltrami.py | 30 | 0 | l2 | T R S M | L φₖ = λₖ M φₖ; log(λₖ A / 4πk) | all vertices (>= 1000) |
@@ -140,3 +140,10 @@ stores a signature of the config; `query()` refuses a mismatched index.
 - The hard per-file timeout kills the pool via the private
   `ProcessPoolExecutor._processes`; a cooperative check also runs between descriptors.
 - Evaluation fits z-score stats / PCA on the full database (transductive).
+
+## Active work: BLR re-ranker
+- Plan: DOCS/BLR_PLAN.md. Do ONE phase per session. Stop at the phase gate and report.
+- Follow SKILLS/SKILL.md for every .py file.
+- Never tune anything on class labels unless the plan says so. Class labels are for evaluation only.
+- New code goes in src/blr/. Do not edit descriptor extractors except for Phase 0 fixes.
+- D4 (v2, 2026-09-30) is unsigned |V| and mirror-invariant (decided): no handedness anywhere; the plan's R04 pair is dropped.
