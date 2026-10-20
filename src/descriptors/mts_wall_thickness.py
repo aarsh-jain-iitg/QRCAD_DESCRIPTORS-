@@ -3,40 +3,42 @@
 FILE: mts_wall_thickness.py
 ================================================================================
 PURPOSE:
-    MTS wall thickness spectrum (Shape Diameter Function),
-    CAD_Descriptors_Explained.pdf, Algorithm 15: from each surface sample cast
-    a cone of rays into the material, take a robust median of the
-    cosine-projected first-hit distances as the local wall thickness, and
-    summarise log10(thickness / D_diam).
+    MTS, wall thickness (PDF Algorithm 15). From each surface point, shoot
+    16 rays straight into the material in a small cone and see how far
+    each one travels before it comes out the other side. The middle value
+    is the wall thickness at that point. Output: histogram of thickness
+    (log scale, divided by part size) plus summary numbers.
 
 INPUTS:
-    - PreparedMesh (welded mesh for ray casting, default samples, D_diam).
-    - params: rays (16), cone_deg (30), eps (1e-6 of D_diam), bins (32),
-      log_lo (-3), log_hi (0), thin (0.01).
+    - PreparedMesh (cleaned mesh for the rays, surface sample points, part size D_diam).
+    - params: rays (16), cone_deg (30), eps (start offset, 1e-6 of D_diam),
+      bins (32), log_lo (-3), log_hi (0), thin (0.01).
 
 OUTPUTS:
     - float32 vector, shape (bins + 8,):
-      [Hellinger hist of log10 w^ on [-3, 0] | mu, sigma, gamma_1, Q1, Q2, Q3,
-       f_thin, f_miss].
+      [thickness histogram on log10 scale -3..0 | mean, spread, skewness,
+       25 %, 50 %, 75 % values, share of thin walls, share of rays that missed].
 
 DEPENDENCIES:
     stdlib      : math
-    third-party : numpy, trimesh (Embree via embreex when installed)
+    third-party : numpy, trimesh (uses embreex for fast rays when installed)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - w_i = median_j (tau_ij cos angle(d_ij, -n_i)) after dropping values more
-      than one standard deviation from the mean; w^ = w / D_diam (eq. 29).
-    - Ray pattern (16 = 1 + 5 + 10): one ray along -n, five at 15 deg and
-      ten at 30 deg, at azimuths symmetric about the tangent direction
-      that points toward the centroid. The pattern moves with the part and
-      is mirror-symmetric, so rotations and reflections leave it unchanged
-      (a fixed-world pattern would not be).
-    - f_thin = Pr[w^ < 0.01]; f_miss = share of rays that hit nothing
-      (0 for a watertight part, a mesh-quality flag).
+    - Thickness at a point: each ray's length is projected onto the inward
+      direction, values far from the average (more than one standard
+      deviation) are dropped, and the middle value of the rest is kept;
+      then divided by D_diam (eq. 29).
+    - Ray layout (16 = 1 + 5 + 10): one straight in, five tilted 15 deg,
+      ten tilted 30 deg. The layout is lined up with the direction toward
+      the part's centre, so it turns and mirrors with the part and the
+      result does not change.
+    - Thin share = fraction of points thinner than 0.01 D_diam. Missed share
+      = fraction of rays that hit nothing (0 for a closed part; a high
+      value warns of a broken mesh).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -52,10 +54,10 @@ from src.descriptors.base import EPS, Descriptor, hellinger_hist, skewness
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _cone_pattern(n_rays: int, cone_deg: float) -> np.ndarray:
     """
-    Unit directions (n_rays, 3) in a local frame (t, b, -n) -> components
-    (along t, along b, along -n). Layout: 1 axial ray, then rings at
-    cone/2 and cone with 1/3 and 2/3 of the remaining rays, azimuths
-    starting at 0 so the set is symmetric under b -> -b.
+    Ray directions (n_rays, 3) as (along t, along b, inward). One straight
+    ray, then a ring at cone/2 with 1/3 of the rest and a ring at cone with
+    2/3 of the rest. Each ring starts at angle 0, so the set is the same
+    when mirrored across t.
     """
     rest = n_rays - 1
     inner = rest // 3
@@ -71,35 +73,35 @@ def _cone_pattern(n_rays: int, cone_deg: float) -> np.ndarray:
 
 def _robust_median(tau: np.ndarray) -> np.ndarray:
     """
-    Row-wise median of finite entries after rejecting |x - mean| > std.
+    Middle value per row, after dropping values more than one std from the mean.
 
     Parameters
     ----------
     tau : np.ndarray, shape (n, c)
-        Projected hit distances, NaN for misses.
+        Projected ray lengths, NaN where a ray missed.
 
     Returns
     -------
     np.ndarray, shape (n,)
-        Robust medians; NaN where a row has no hits.
+        Middle values; NaN where every ray in the row missed.
     """
     out = np.full(len(tau), np.nan)
     hit = np.any(np.isfinite(tau), axis=1)
     t = tau[hit]
     mu = np.nanmean(t, axis=1, keepdims=True)
     sd = np.nanstd(t, axis=1, keepdims=True)
-    kept = np.where(np.abs(t - mu) <= sd + 1e-15, t, np.nan)   # the mean-nearest value always survives
+    kept = np.where(np.abs(t - mu) <= sd + 1e-15, t, np.nan)   # the value closest to the mean is always kept
     out[hit] = np.nanmedian(kept, axis=1)
     return out
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class MTSWallThickness(Descriptor):
-    """MTS: log wall-thickness spectrum from the shape diameter function."""
-    # w_i = median_j(tau_ij cos angle(d_ij, -n_i)),  w^_i = w_i / D_diam in (0, 1]
-    # F_MTS = [hist32(log10 w^; [-3, 0]), mu, sigma, gamma_1, Q1, Q2, Q3 of log10 w^,
-    #          f_thin, f_miss]
-    # points: all n = 2e4 surface samples (pipeline.n_samples), 16 rays each (params.rays) = 3.2e5 rays
+    """MTS: wall thickness histogram from rays shot into the material."""
+    # thickness = middle value of (ray length * cos(tilt)) / D_diam, in (0, 1]
+    # output = [32-bin hist of log10 thickness on [-3, 0], mean, spread, skewness,
+    #           25/50/75 % values, thin share, missed share]
+    # points used: all 2e4 surface samples (pipeline.n_samples), 16 rays each (params.rays) = 3.2e5 rays
 
     name = "mts"
     version = "1"
@@ -117,7 +119,7 @@ class MTSWallThickness(Descriptor):
         P, Nn = s.points, s.normals
         n = len(P)
         D = mesh.diameter
-        # tangent t toward the centroid (rotation-covariant), fallback any perpendicular
+        # surface direction t pointing toward the centre (turns with the part); any flat direction if none
         t = (mesh.centroid - P)
         t -= np.einsum("ij,ij->i", t, Nn)[:, None] * Nn
         tn = np.linalg.norm(t, axis=1)
@@ -135,7 +137,7 @@ class MTSWallThickness(Descriptor):
         tau = np.full(n * c, np.nan)
         tau[ray_id] = np.linalg.norm(locs - origins[ray_id], axis=1)
         f_miss = float(np.isnan(tau).mean())
-        # eq.(29): tau_ij * cos angle(d_ij, -n_i); the cosine is the pattern's third component
+        # ray length times cos(tilt); the cosine is the pattern's third component (eq. 29)
         proj = tau.reshape(n, c) * pat[None, :, 2]
         w_hat = _robust_median(proj) / D
         w_hat = w_hat[np.isfinite(w_hat) & (w_hat > 0)]
@@ -146,22 +148,23 @@ class MTSWallThickness(Descriptor):
         h = hellinger_hist(lw, self.n_hist, float(p["log_lo"]), float(p["log_hi"]))
         q1, q2, q3 = np.quantile(lw, [0.25, 0.5, 0.75])
         f_thin = float(np.mean(w_hat < float(p["thin"])))
-        # eq.(30): [hist, mu, sigma, gamma_1, Q1, Q2, Q3, f_thin, f_miss]
+        # [histogram, mean, spread, skewness, 25/50/75 %, thin share, missed share] (eq. 30)
         return np.concatenate([h, [lw.mean(), lw.std(), skewness(lw), q1, q2, q3, f_thin, f_miss]])
 
 # ==============================================================================
 # END OF FILE: mts_wall_thickness.py
 # ==============================================================================
 # SUMMARY:
-#   MTS: log10 wall-thickness histogram + 8 summary values via ray casting.
+#   MTS: log wall-thickness histogram + 8 summary numbers, from ray casting.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.mts_wall_thickness import MTSWallThickness
 #   v = MTSWallThickness().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Without embreex, trimesh falls back to a much slower ray engine.
+#   - [ ] Without embreex installed, ray casting is much slower.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

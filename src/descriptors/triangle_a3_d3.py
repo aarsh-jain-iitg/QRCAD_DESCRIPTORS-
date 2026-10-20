@@ -3,17 +3,17 @@
 FILE: triangle_a3_d3.py
 ================================================================================
 PURPOSE:
-    Triangle descriptor (A3 angle + D3 area), CAD_Descriptors_Explained.pdf,
-    Algorithm 3: for S random sample triples, the corner angle at p1 and the
-    square root of the triangle area / D_diam^2.
+    Triangle descriptor, A3 angle + D3 area (PDF Algorithm 3). Picks many
+    random sets of three surface points. For each triangle it records the
+    angle at the first corner and the size of the triangle, and stores both
+    as histograms.
 
 INPUTS:
-    - PreparedMesh (default sample pool, D_diam), seeded rng.
-    - params: bins (32 per reading), triples S (2e5).
+    - PreparedMesh (surface sample points, part size D_diam), seeded rng.
+    - params: bins (32 for each histogram), triples (2e5).
 
 OUTPUTS:
-    - float32 vector, shape (2*bins,): [hist(theta) | hist(sqrt A^)], each
-      Hellinger-mapped.
+    - float32 vector, shape (2*bins,): [angle histogram | area histogram].
 
 DEPENDENCIES:
     stdlib      : math
@@ -21,12 +21,14 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - theta = atan2(|u x w|, u.w) in [0, pi] (atan2 keeps 0 and pi accurate).
-    - A^ = 0.5 |u x w| / D_diam^2 in [0, sqrt3/4]; histogram of sqrt(A^) on
-      [0, sqrt(sqrt3/4)] (equilateral triangle of side D_diam is the maximum).
+    - Angle at corner p1, between 0 and 180 deg. Computed with atan2,
+      which stays accurate for angles near 0 and 180 deg.
+    - Area is divided by D_diam^2; the histogram is of its square root
+      (so it behaves like a length). The largest possible triangle is the
+      equilateral one with side D_diam, which sets the top of the range.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -40,12 +42,12 @@ from src.descriptors.base import (Descriptor, distinct_tuples, hellinger_hist,
                                   resolve_torch_device, torch_gather)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-SQRT_AREA_MAX = math.sqrt(math.sqrt(3.0) / 4.0)   # [-] upper edge of the D3 histogram
+SQRT_AREA_MAX = math.sqrt(math.sqrt(3.0) / 4.0)   # [-] top of the area histogram (equilateral triangle)
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _cross_dot_torch(P: np.ndarray, idx: np.ndarray, dev) -> tuple[np.ndarray, np.ndarray]:
-    """GPU twin of (|u x w| [L^2], u . w [L^2]) for index triples idx (S, 3), float64."""
+    """GPU version: (|u x w| [L^2], u . w [L^2]) for each index triple in idx (S, 3)."""
     import torch
     q = torch_gather(P, idx, dev)
     u, w = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]
@@ -55,11 +57,11 @@ def _cross_dot_torch(P: np.ndarray, idx: np.ndarray, dev) -> tuple[np.ndarray, n
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class TriangleA3D3(Descriptor):
-    """Triangle descriptor: A3 angle + D3 area."""
-    # u = p2 - p1,  w = p3 - p1
-    # theta = atan2(|u x w|, u . w) in [0, pi],  F_A3 = hist32({theta}; [0, pi])
-    # A^ = |u x w| / (2 D_diam^2) in [0, sqrt3/4],  F_D3 = hist32({sqrt A^}; [0, sqrt(sqrt3/4)])
-    # points: S = 2e5 random triples (params.triples) drawn from n = 2e4 surface samples (pipeline.n_samples)
+    """Triangle descriptor: corner angle (A3) + triangle size (D3)."""
+    # u = p2 - p1,  w = p3 - p1  (the two sides that meet at p1)
+    # angle = atan2(|u x w|, u . w) in [0, pi]           -> 32-bin histogram
+    # area = |u x w| / (2 D_diam^2); sqrt(area) on [0, sqrt(sqrt3/4)] -> 32-bin histogram
+    # points used: 2e5 random triples (params.triples) from the 2e4 surface samples (pipeline.n_samples)
 
     name = "triangle"
     version = "1"
@@ -80,9 +82,9 @@ class TriangleA3D3(Descriptor):
             dot = np.einsum("ij,ij->i", u, w)
         else:
             cross, dot = _cross_dot_torch(P, idx, dev)
-        # A3 eq.(7): theta = atan2(|u x w|, u.w)
+        # corner angle at p1 (eq. 7)
         theta = np.arctan2(cross, dot)
-        # D3 eq.(8): sqrt(A^), A^ = 0.5 |u x w| / D_diam^2
+        # square root of triangle area / D_diam^2 (eq. 8)
         a = np.sqrt(0.5 * cross / mesh.diameter ** 2)
         b = int(self.params["bins"])
         return np.concatenate([hellinger_hist(theta, b, 0.0, math.pi),
@@ -92,16 +94,17 @@ class TriangleA3D3(Descriptor):
 # END OF FILE: triangle_a3_d3.py
 # ==============================================================================
 # SUMMARY:
-#   A3 + D3 random-triangle histograms (2 x 32 bins, Hellinger).
+#   Triangle: angle + size histograms of random point triangles (2 x 32 bins).
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.triangle_a3_d3 import TriangleA3D3
 #   v = TriangleA3D3().compute(prepared_mesh, np.random.default_rng(0))
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Cannot see departure from a plane; that is D4's job.
+#   - [ ] Cannot tell how far a shape is from flat; D4 covers that.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-10-04  optional GPU path for the triple cross/dot products (device = cuda)
+#   2026-10-04  optional GPU version (device = cuda)
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

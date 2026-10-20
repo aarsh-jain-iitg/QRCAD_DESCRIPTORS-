@@ -3,17 +3,18 @@
 FILE: ncf_normal_correlation.py
 ================================================================================
 PURPOSE:
-    NCF normal correlation over distance, CAD_Descriptors_Explained.pdf,
-    Algorithm 6: for S random sample pairs, accumulate the normal agreement
-    n_i . n_j into the bin of their normalised distance.
+    NCF, do nearby and far-apart surfaces face the same way? (PDF Algorithm
+    6). Picks many random pairs of surface points. For each pair it checks
+    how much their facing directions agree (+1 same, 0 at right angles,
+    -1 opposite) and adds that to a bin chosen by how far apart they are.
 
 INPUTS:
-    - PreparedMesh (default sample pool with normals, D_diam), seeded rng.
-    - params: bins (32), pairs S (2e5).
+    - PreparedMesh (surface sample points with normals, part size D_diam), seeded rng.
+    - params: bins (32), pairs (2e5).
 
 OUTPUTS:
-    - float32 vector, shape (bins,): g(m) = (1/S) sum (n_i . n_j) 1[r_ij in B_m].
-      Signed values; not a histogram, so it is z-scored downstream.
+    - float32 vector, shape (bins,): average agreement in each distance bin.
+      Values can be negative, so this is not a histogram.
 
 DEPENDENCIES:
     stdlib      : (none)
@@ -21,11 +22,12 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - r and n_i . n_j are unchanged by rotation, reflection, shift, scale.
-    - sum_m g(m) = |E n|^2 = 0 for a closed part.
+    - Distances and angles between normals do not change when the part is
+      moved, turned, mirrored or scaled (distances are divided by D_diam).
+    - For a closed part all bins add up to 0.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -39,7 +41,7 @@ from src.descriptors.base import Descriptor, distinct_tuples, resolve_torch_devi
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _dist_dot_torch(P: np.ndarray, Nn: np.ndarray, idx: np.ndarray,
                     dev) -> tuple[np.ndarray, np.ndarray]:
-    """GPU twin of (|p_i - p_j| [L], n_i . n_j [-]) for index pairs idx (S, 2), float64."""
+    """GPU version: (distance [L], normal agreement n_i . n_j [-]) for each pair in idx (S, 2)."""
     import torch
     q, nq = torch_gather(P, idx, dev), torch_gather(Nn, idx, dev)
     r = torch.linalg.vector_norm(q[:, 0] - q[:, 1], dim=1)
@@ -48,10 +50,10 @@ def _dist_dot_torch(P: np.ndarray, Nn: np.ndarray, idx: np.ndarray,
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class NCFNormalCorrelation(Descriptor):
-    """NCF: normal agreement as a function of distance."""
-    # r^_ij = |p_i - p_j| / D_diam
-    # g(m) = (1/S) sum_(i,j) (n_i . n_j) 1[r^_ij in B_m],  m = 1..32
-    # points: S = 2e5 random pairs (params.pairs) drawn from n = 2e4 surface samples (pipeline.n_samples)
+    """NCF: how much surface directions agree, by distance."""
+    # r_ij = |p_i - p_j| / D_diam picks the bin m
+    # g(m) = (1/S) * sum of (n_i . n_j) over the pairs in bin m,  m = 1..32
+    # points used: 2e5 random pairs (params.pairs) from the 2e4 surface samples (pipeline.n_samples)
 
     name = "ncf"
     version = "1"
@@ -73,7 +75,7 @@ class NCFNormalCorrelation(Descriptor):
         else:
             r, dots = _dist_dot_torch(s.points, s.normals, idx, dev)
         m = np.clip((r / mesh.diameter * self.dim).astype(np.int64), 0, self.dim - 1)
-        # eq.(13): g(m) = (1/S) sum (n_i . n_j) 1[r_ij in B_m]
+        # add each pair's agreement to its distance bin, divide by the number of pairs (eq. 13)
         g = np.bincount(m, weights=dots, minlength=self.dim)
         return g / len(idx)
 
@@ -81,16 +83,17 @@ class NCFNormalCorrelation(Descriptor):
 # END OF FILE: ncf_normal_correlation.py
 # ==============================================================================
 # SUMMARY:
-#   NCF: 32-bin signed normal-agreement profile over normalised distance.
+#   NCF: 32 values, normal agreement of point pairs by distance.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.ncf_normal_correlation import NCFNormalCorrelation
 #   v = NCFNormalCorrelation().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Measures positions and directions only, not connectivity.
+#   - [ ] Uses positions and directions only, not which surfaces are connected.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-10-04  optional GPU path for pair distances / normal dots (device = cuda)
+#   2026-10-04  optional GPU version (device = cuda)
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

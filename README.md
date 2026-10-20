@@ -157,3 +157,4 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-10-01 | BLR augmentation noise 0.01 D -> 0.001 D; Gate 5 rerun: L3 MRR 0.869 vs L1 0.843 (Holm p 0.059), L1r 0.874; DAD, PAF, CURV, T1 still unreliable (eps_b > 0.2) |
 | 2026-10-04 | Added `generate_ss.py`: batch per-descriptor PNGs, part renders, A/B cosine / change / re-seed noise for the descriptor-alignment deck |
 | 2026-10-15 | Added `cosine_table.py` (double-clickable A/B cosine table per descriptor); regenerated `outputs/descriptor_ss` with the current descriptors |
+| 2026-10-21 | Descriptors: plain-language comments and docstrings in all 15 descriptor files + `base.py` / `__init__.py` (no code change, AST-identical). `SENDING/` and `SENDING.zip` removed from the repo (kept locally, git-ignored) |

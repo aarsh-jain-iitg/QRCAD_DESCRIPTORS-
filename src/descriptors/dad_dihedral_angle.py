@@ -3,16 +3,18 @@
 FILE: dad_dihedral_angle.py
 ================================================================================
 PURPOSE:
-    DAD dihedral angle distribution, CAD_Descriptors_Explained.pdf, Algorithm
-    8: length-weighted histogram of fold angles over crease edges, plus total
-    crease length and total mean curvature.
+    DAD, sharp edges and their angles (PDF Algorithm 8). Looks at every
+    edge where two triangles meet and measures the fold angle there. Sharp
+    edges (folds of more than 20 deg) go into a histogram weighted by edge
+    length. Also stores the total length of sharp edges and the total
+    amount of bending.
 
 INPUTS:
-    - PreparedMesh (welded mesh with consistent outward normals).
-    - params: bins (36 bins of 10 deg), tau_deg (crease threshold, 20).
+    - PreparedMesh (cleaned mesh with normals pointing outward).
+    - params: bins (36 bins of 10 deg), tau_deg (sharp-edge threshold, 20).
 
 OUTPUTS:
-    - float32 vector, shape (bins+2,): [Hellinger hist | Lambda | H].
+    - float32 vector, shape (bins+2,): [angle histogram | sharp-edge length | total bending].
 
 DEPENDENCIES:
     stdlib      : math
@@ -20,19 +22,21 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - sigma_e = sign((b_j - b_i) . n_i), theta_e = pi + sigma_e arccos(n_i.n_j)
-      in [0, 2 pi]: theta < pi convex, theta > pi concave (eq. 17).
-    - Only edges with exactly two faces are used; creases are |theta-pi| > tau.
-    - Binning is linear (soft): CAD creases are exactly 90 deg, which is a
-      bin edge of the PDF's 36 x 10 deg bins, so hard binning flipped the
-      whole crease mass between bins under rounding noise (measured 11 %
-      vector change for a rotated box). Soft binning splits it evenly.
-    - Lambda = sum_creases l_e / sqrt A, H = 1/2 sum_e (pi - theta_e) l_e / sqrt A
-      (discrete total mean curvature, Steiner) (eq. 18).
-    - Angles between normals and lengths / sqrt A: fully similarity-invariant.
+    - Fold angle from 0 to 360 deg: 180 is flat, below 180 is an outside
+      corner (convex), above 180 is an inside corner (concave) (eq. 17).
+    - Only edges shared by exactly two triangles are used. An edge is
+      sharp when its angle is more than tau_deg away from flat.
+    - Each angle is shared between its two nearest bins. CAD corners are
+      exactly 90 deg, which falls right on a bin edge; without sharing,
+      tiny rounding errors moved them between bins (measured 11 % change
+      for a rotated box).
+    - Sharp-edge length and total bending are divided by sqrt(area) so
+      they do not depend on size (eq. 18).
+    - Uses angles and length ratios only: moving, turning, mirroring or
+      scaling the part changes nothing.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -47,11 +51,12 @@ from src.descriptors.base import Descriptor, soft_hellinger_hist
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class DADDihedralAngle(Descriptor):
-    """DAD: crease-angle histogram + crease length + total bending."""
-    # sigma_e = sign((b_j - b_i) . n_i),  theta_e = pi + sigma_e arccos(n_i . n_j) in [0, 2 pi]
-    # F_DAD(b) = sum_{e in b, |theta_e - pi| > tau} l_e / sum_{|theta_e - pi| > tau} l_e  (36 x 10 deg)
-    # Lambda = sum_creases l_e / sqrt A,  H = (1/2) sum_e (pi - theta_e) l_e / sqrt A
-    # points: none sampled; every edge shared by two faces of the welded mesh
+    """DAD: sharp-edge angle histogram + sharp-edge length + total bending."""
+    # sign = +1 for an outside corner, -1 for an inside corner
+    # angle = pi + sign * (angle between the two normals), in [0, 2 pi]
+    # histogram: 36 x 10 deg bins of sharp-edge angles, weighted by edge length
+    # length = sum of sharp-edge lengths / sqrt A,  bending = (1/2) sum (pi - angle) * length / sqrt A
+    # points used: none sampled; every edge shared by two triangles
 
     name = "dad"
     version = "2"
@@ -64,14 +69,14 @@ class DADDihedralAngle(Descriptor):
 
     def _compute(self, mesh, rng: np.random.Generator) -> np.ndarray:
         tm = mesh.mesh
-        fa = np.asarray(tm.face_adjacency)                  # (E2, 2) manifold edges only
+        fa = np.asarray(tm.face_adjacency)                  # (E2, 2) edges with exactly two triangles
         if len(fa) == 0:
             return np.zeros(self.dim)
         N, B = mesh.face_normals, mesh.face_centers
         ni, nj = N[fa[:, 0]], N[fa[:, 1]]
         ang = np.arccos(np.clip(np.einsum("ij,ij->i", ni, nj), -1.0, 1.0))
         sigma = np.sign(np.einsum("ij,ij->i", B[fa[:, 1]] - B[fa[:, 0]], ni))
-        # eq.(17): theta_e = pi + sigma_e arccos(n_i . n_j)
+        # fold angle: 180 deg flat, below = outside corner, above = inside corner (eq. 17)
         theta = math.pi + sigma * ang
         e = np.asarray(tm.face_adjacency_edges)
         length = np.linalg.norm(tm.vertices[e[:, 0]] - tm.vertices[e[:, 1]], axis=1)
@@ -79,7 +84,7 @@ class DADDihedralAngle(Descriptor):
         sqrtA = math.sqrt(mesh.area)
         h = soft_hellinger_hist(theta[crease], self.n_hist, 0.0, 2.0 * math.pi,
                                 weights=length[crease])
-        # eq.(18): Lambda = sum l_e / sqrt A, H = 1/2 sum (pi - theta) l_e / sqrt A
+        # sharp-edge length and total bending, divided by sqrt(area) (eq. 18)
         lam = float(length[crease].sum()) / sqrtA
         H = 0.5 * float(((math.pi - theta) * length).sum()) / sqrtA
         return np.concatenate([h, [lam, H]])
@@ -88,15 +93,16 @@ class DADDihedralAngle(Descriptor):
 # END OF FILE: dad_dihedral_angle.py
 # ==============================================================================
 # SUMMARY:
-#   DAD: 36-bin crease-angle histogram + crease length + total mean curvature.
+#   DAD: 36-bin sharp-edge angle histogram + sharp-edge length + total bending.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.dad_dihedral_angle import DADDihedralAngle
 #   v = DADDihedralAngle().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Non-manifold edges (>2 faces) are ignored, as trimesh.face_adjacency does.
+#   - [ ] Edges shared by more than two triangles are skipped (as trimesh does).
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

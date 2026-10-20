@@ -3,18 +3,20 @@
 FILE: crs_a_angular_spectrum.py
 ================================================================================
 PURPOSE:
-    CRS-A angular pattern spectrum, CAD_Descriptors_Explained.pdf, Algorithm
-    13: azimuth histograms about the symmetry axis in four radial bands,
-    reduced to Fourier magnitudes |a_q(m)| / |a_q(0)|, m = 1..32, so N-fold
-    patterns (teeth, bolt circles) show as harmonic N.
+    CRS-A, repeating patterns around the axis (PDF Algorithm 13). Walks
+    around the turning axis and counts how much surface sits at each angle,
+    separately in four rings from the axis outward. It then checks which
+    repeat counts are present: a gear with 20 teeth lights up value 20,
+    a flange with 6 bolt holes lights up value 6.
 
 INPUTS:
-    - PreparedMesh: its own larger pool (definition: n ~ 2e5) plus the
-      principal axes / D_diam of the default pool.
-    - params: n_pool (2e5), bands (4), n_phi (256), harmonics (32).
+    - PreparedMesh: a larger set of 2e5 surface points, plus the main axes
+      and part size D_diam.
+    - params: n_pool (2e5), bands (4 rings), n_phi (256 angle bins), harmonics (32).
 
 OUTPUTS:
-    - float32 vector, shape (bands * harmonics,).
+    - float32 vector, shape (bands * harmonics,): for each ring, the
+      strength of every repeat count 1..32 (relative to the total).
 
 DEPENDENCIES:
     stdlib      : math
@@ -22,14 +24,16 @@ DEPENDENCIES:
     internal    : descriptors.base, descriptors.crs_r_ring_profile
 
 PHYSICS / DOMAIN CONTEXT:
-    - phi_i = atan2((p_i - c).e_b, (p_i - c).e_c); a rotation about e_s shifts
-      phi, multiplying a^(m) by a unit phase; flipping e_b or e_c maps
-      phi -> -phi or phi + pi; magnitudes are unchanged in every case.
-    - Bands split [0, max rho] of the distance to e_s into equal parts.
-    - Samples are area-uniform, so plain counts are area weights.
+    - Angle around the axis = atan2 of the point's position along the
+      other two axes. Turning the part about its axis just shifts all
+      angles; flipping an axis mirrors them. Neither changes the repeat
+      strengths (from a Fourier transform, ignoring phase).
+    - The four rings split [0, largest distance from the axis] evenly.
+    - Points are spread evenly over the surface, so plain counts already
+      weight by area.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -46,7 +50,7 @@ from src.descriptors.crs_r_ring_profile import axis_distance, symmetry_axis
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _phi_rho_torch(X: np.ndarray, eb: np.ndarray, ec: np.ndarray, es: np.ndarray,
                    dev) -> tuple[np.ndarray, np.ndarray]:
-    """GPU twin of (azimuth phi [rad], distance to axis e_s [L]) of centred points X (N, 3)."""
+    """GPU version: (angle around axis [rad], distance to axis e_s [L]) of points X (N, 3)."""
     import torch
     Xt = torch.as_tensor(X, dtype=torch.float64, device=dev)
     E = torch.as_tensor(np.stack([eb, ec, es]), dtype=torch.float64, device=dev)
@@ -57,11 +61,11 @@ def _phi_rho_torch(X: np.ndarray, eb: np.ndarray, ec: np.ndarray, es: np.ndarray
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class CRSAAngularSpectrum(Descriptor):
-    """CRS-A: per-band azimuthal Fourier magnitudes."""
-    # phi_i = atan2((p_i - c) . e_b, (p_i - c) . e_c),  a_q(j) = hist256(phi) in radius band q
-    # a^_q(m) = sum_{j=0}^{N_phi-1} a_q(j) exp(-2 pi i m j / N_phi)
-    # F_CRS-A = [|a^_q(m)| / |a^_q(0)|]_{q=1..4, m=1..32}
-    # points: n = 2e5 surface samples (params.n_pool, larger pool than the default 2e4)
+    """CRS-A: strength of each repeat count around the axis, per ring."""
+    # angle of each point around the turning axis -> 256-bin histogram per ring
+    # Fourier transform of that histogram -> strength of repeat count m
+    # output = [strength(m) / strength(0)] for 4 rings x m = 1..32
+    # points used: 2e5 surface samples (params.n_pool, larger than the default 2e4)
 
     name = "crs_a"
     version = "1"
@@ -88,7 +92,7 @@ class CRSAAngularSpectrum(Descriptor):
         for q in range(nb):
             a, _ = np.histogram(phi[band == q], bins=nphi, range=(-math.pi, math.pi))
             A = np.abs(np.fft.rfft(a))
-            # eq.(27): |a_q(m)| / |a_q(0)|, m = 1..M
+            # repeat strengths 1..M divided by the total (eq. 27)
             if A[0] > 0:
                 out[q] = A[1:M + 1] / A[0]
         return out.ravel()
@@ -97,16 +101,17 @@ class CRSAAngularSpectrum(Descriptor):
 # END OF FILE: crs_a_angular_spectrum.py
 # ==============================================================================
 # SUMMARY:
-#   CRS-A: 4 bands x 32 azimuthal harmonic magnitudes about the symmetry axis.
+#   CRS-A: 4 rings x 32 repeat strengths around the turning axis.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.crs_a_angular_spectrum import CRSAAngularSpectrum
 #   v = CRSAAngularSpectrum().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Axis inherited from CRS-R: undefined for isotropic covariance.
+#   - [ ] Uses the CRS-R axis: no single axis for cube- or sphere-like parts.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-10-04  optional GPU path for azimuths / axis distances (device = cuda)
+#   2026-10-04  optional GPU version (device = cuda)
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

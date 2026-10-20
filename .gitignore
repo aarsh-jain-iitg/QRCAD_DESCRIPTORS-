@@ -3,3 +3,7 @@ cache/
 dataset/_sample/
 __pycache__/
 .pytest_cache/
+
+# local hand-off package, not part of the repo
+SENDING/
+SENDING.zip

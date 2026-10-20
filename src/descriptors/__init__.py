@@ -3,12 +3,12 @@
 FILE: __init__.py  (src/descriptors)
 ================================================================================
 PURPOSE:
-    Registry of the fifteen descriptors: maps the config name of each
-    descriptor to its class, in the PDF's ladder order, so the orchestrator
-    can discover and instantiate them by name.
+    List of the fifteen descriptors: maps each descriptor's config name to
+    its class, in the order of the PDF, so the orchestrator can create them
+    by name.
 
 INPUTS:
-    - Descriptor names (from [pipeline].enabled) and their params.
+    - Descriptor names (from [pipeline].enabled) and their settings.
 
 OUTPUTS:
     - REGISTRY : dict[str, type[Descriptor]]
@@ -20,7 +20,7 @@ DEPENDENCIES:
     internal    : every descriptor module
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -46,7 +46,7 @@ from src.descriptors.t1_genus import T1Genus
 from src.descriptors.triangle_a3_d3 import TriangleA3D3
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-# PDF ladder order (D1 -> MTS); this order is also the block order of fused vectors.
+# PDF order (D1 -> MTS); the combined vector stores the blocks in this same order.
 REGISTRY: dict[str, type[Descriptor]] = {cls.name: cls for cls in (
     D1RadialDistance, D2PairwiseDistance, TriangleA3D3, D4TetrahedronVolume,
     SHPSOrientationSpectrum, NCFNormalCorrelation, LBELaplaceBeltrami,
@@ -59,16 +59,16 @@ REGISTRY: dict[str, type[Descriptor]] = {cls.name: cls for cls in (
 def make_descriptors(names: list[str], params: dict[str, dict[str, Any]],
                      device: str = "cpu") -> list[Descriptor]:
     """
-    Instantiate descriptors by name, in registry order.
+    Create descriptors by name, in registry order.
 
     Parameters
     ----------
     names : list[str]
-        Registry keys to enable.
+        Names of the descriptors to turn on.
     params : dict[str, dict]
-        Per-descriptor param overrides ([descriptors.<name>]).
+        Per-descriptor settings ([descriptors.<name>]).
     device : str
-        "cpu" or "cuda" (only descriptors with a GPU path use it).
+        "cpu" or "cuda" (only descriptors with a GPU version use it).
 
     Returns
     -------
@@ -86,7 +86,7 @@ __all__ = ["REGISTRY", "Descriptor", "DescriptorError", "make_descriptors"]
 # END OF FILE: __init__.py  (src/descriptors)
 # ==============================================================================
 # SUMMARY:
-#   Name -> class registry for the 15 PDF descriptors.
+#   Name -> class list of the 15 descriptors.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors import make_descriptors
@@ -97,4 +97,5 @@ __all__ = ["REGISTRY", "Descriptor", "DescriptorError", "make_descriptors"]
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

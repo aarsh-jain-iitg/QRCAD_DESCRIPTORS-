@@ -3,20 +3,26 @@
 FILE: paf_planar_families.py
 ================================================================================
 PURPOSE:
-    PAF planar face families, CAD_Descriptors_Explained.pdf, Algorithm 14:
-    global normal moments (Westin coefficients, I4, normal entropy) plus, for
-    the 6 largest families of parallel planar faces, the area share, number of
-    distinct planes, spacing regularity and angle to the main family.
+    PAF, flat faces and how they line up (PDF Algorithm 14). Two parts:
+      1. Overall direction summary: is the surface mostly facing one way
+         (rod-like), two ways (plate-like) or all ways (ball-like)?
+      2. Groups of parallel flat faces (e.g. the top, bottom and step faces
+         of a stepped block all face up). For the 6 biggest groups it
+         records: share of total area, how many separate levels (planes)
+         there are, how evenly those levels are spaced, and the angle to
+         the biggest group.
 
 INPUTS:
-    - PreparedMesh (face normals, areas, centres, adjacency angles, D_diam).
+    - PreparedMesh (triangle normals, areas, centres, neighbour angles, D_diam).
     - params: family_tol_deg (0.25), plane_tol (1e-4 of D_diam),
-      max_families (64, Complexity PDF cap), top_families (6),
-      tau_deg (20), ico_subdivisions (4 -> 2562 cells).
+      max_families (64), top_families (6), tau_deg (20),
+      ico_subdivisions (4 -> 2562 direction cells).
 
 OUTPUTS:
     - float32 vector, shape (7 + 4*top_families,) = 31:
-      [c_l, c_p, c_s, I4, H, N_fam/16, Pi] + 6 x [alpha_s, N_s/10, CV_s, angle/90].
+      [rod-like, plate-like, ball-like, box-likeness I4, direction spread H,
+       #groups/16, flat share] + 6 x [area share, #levels/10, spacing
+       unevenness, angle to biggest group/90].
 
 DEPENDENCIES:
     stdlib      : math
@@ -24,28 +30,28 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - T2 = sum w_t n_t n_t^T, eigenvalues L1 >= L2 >= L3:
-      c_l = L1-L2, c_p = 2(L2-L3), c_s = 3 L3, summing to 1.
-    - I4 = sum_s sum_t w_s w_t (n_s.n_t)^4 = |T4|_F^2 (cube 1/3, ball 1/5).
-    - H = entropy of the area-weighted normals on an icosphere grid,
-      divided by log(G) so it lies in [0, 1]. The grid is fixed in space,
-      so H is rotation invariant only up to cell quantisation; every
-      other entry is exactly invariant.
-    - "Planar face" is not defined for STL triangles in the PDF. Chosen: a
-      triangle is planar unless it meets a neighbour at a small non-zero
-      angle (0.25 deg < angle < tau), i.e. unless it is a facet of a
-      tessellated curved surface. A flat CAD face (coplanar neighbours,
-      creases at its rim) and a lone triangle are both planar.
-    - Families: planar faces sorted by area; the largest unassigned face
-      opens a family and claims every unassigned face with
-      |n.m| >= cos(0.25 deg). This equals the PDF's greedy scan.
-    - Plane offsets h = b.m / D_diam, clustered in 1-D with tolerance 1e-4.
-    - GPU path (device = cuda): T2, T4 = M^T W M with M = n (x) n, and the
-      icosphere cell as argmax n.v (= nearest vertex for unit vectors).
-      The greedy family loop stays on the CPU (sequential, <= 64 steps).
+    - Rod / plate / ball scores come from the average of n n^T over the
+      surface (area-weighted normals n); the three scores add up to 1.
+    - I4 (box-likeness) = average (n_s . n_t)^4 over all triangle pairs:
+      1/3 for a cube, 1/5 for a ball.
+    - H = how evenly the normals spread over a fixed grid of 2562
+      directions, from 0 (one direction) to 1 (all directions). The grid is
+      fixed, so H changes very slightly when the part is turned; every
+      other value does not change at all.
+    - The PDF does not define a "flat face" for STL triangles. Our rule: a
+      triangle is flat unless it meets a neighbour at a small angle
+      (between 0.25 and 20 deg), which is what pieces of a curved surface
+      do. A flat CAD face and a lone triangle both count as flat.
+    - Groups: take the biggest flat triangle not yet grouped; every
+      ungrouped flat triangle facing the same way (within 0.25 deg) joins
+      its group. Repeat.
+    - Levels: each triangle's height along the group direction / D_diam,
+      merged when closer than 1e-4.
+    - GPU version (device = cuda) does the direction summary and grid
+      lookup on the GPU; the grouping loop stays on the CPU (<= 64 steps).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -60,14 +66,14 @@ from scipy.spatial import cKDTree
 from src.descriptors.base import Descriptor, angle_between_lines_deg, resolve_torch_device
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-CELL_CHUNK = 8192           # [-] GPU normals per icosphere-assignment batch (8192 x 2562 float64 = 168 MB)
+CELL_CHUNK = 8192           # [-] GPU: normals per batch for the grid lookup (8192 x 2562 float64 = 168 MB)
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _plane_stats(h: np.ndarray, tol: float) -> tuple[int, float]:
-    """Number of distinct planes and gap CV from 1-D offsets h (dimensionless)."""
-    # points: none sampled; all mesh faces (normals, areas, centres)
-    if len(h) == 0:                       # empty family (seed face was not planar)
+    """Number of separate levels and how unevenly they are spaced, from heights h (unitless)."""
+    # points used: none sampled; every triangle (normals, areas, centres)
+    if len(h) == 0:                       # empty group (its first triangle was not flat)
         return 0, 0.0
     hs = np.sort(h)
     starts = np.concatenate([[0], np.nonzero(np.diff(hs) > tol)[0] + 1])
@@ -83,23 +89,22 @@ def _plane_stats(h: np.ndarray, tol: float) -> tuple[int, float]:
 def _moments_cells_torch(N: np.ndarray, w: np.ndarray, ico: np.ndarray,
                         dev) -> tuple[np.ndarray, float, np.ndarray]:
     """
-    GPU twin of (T2, I4, icosphere cell of each normal), float64.
+    GPU version: (T2, I4, grid cell of each normal), float64.
 
     Parameters
     ----------
     N : np.ndarray, shape (F, 3)
-        Unit face normals [-].
+        Unit triangle normals [-].
     w : np.ndarray, shape (F,)
         Area weights [-].
     ico : np.ndarray, shape (G, 3)
-        Unit icosphere vertices.
+        Unit directions of the grid.
     dev : torch.device
 
     Returns
     -------
     T2 : np.ndarray, shape (3, 3)
     I4 : float
-        |T4|_F^2.
     cell : np.ndarray, shape (F,), int64
     """
     import torch
@@ -107,8 +112,8 @@ def _moments_cells_torch(N: np.ndarray, w: np.ndarray, ico: np.ndarray,
     wt = torch.as_tensor(w, dtype=torch.float64, device=dev)
     Vt = torch.as_tensor(ico, dtype=torch.float64, device=dev)
     T2 = (Nt * wt[:, None]).T @ Nt
-    M = (Nt[:, :, None] * Nt[:, None, :]).reshape(-1, 9)     # n (x) n
-    T4 = (M * wt[:, None]).T @ M                              # T4_ijkl as (ij, kl)
+    M = (Nt[:, :, None] * Nt[:, None, :]).reshape(-1, 9)     # n n^T as 9 numbers
+    T4 = (M * wt[:, None]).T @ M                              # 4th-order average as a 9 x 9 table
     cell = torch.cat([torch.argmax(Nt[s:s + CELL_CHUNK] @ Vt.T, dim=1)
                       for s in range(0, len(Nt), CELL_CHUNK)])
     return T2.cpu().numpy(), float((T4 ** 2).sum()), cell.cpu().numpy()
@@ -116,10 +121,10 @@ def _moments_cells_torch(N: np.ndarray, w: np.ndarray, ico: np.ndarray,
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class PAFPlanarFamilies(Descriptor):
-    """PAF: planar face families and normal moments."""
-    # T2 = sum_t w_t n_t n_t^T,  Lambda_1 >= Lambda_2 >= Lambda_3
-    # c_l = Lambda_1 - Lambda_2,  c_p = 2 (Lambda_2 - Lambda_3),  c_s = 3 Lambda_3
-    # I4 = sum_{s,t} w_s w_t (n_s . n_t)^4
+    """PAF: groups of parallel flat faces + overall direction summary."""
+    # T2 = sum of w n n^T over triangles; its three values L1 >= L2 >= L3
+    # rod-like = L1 - L2,  plate-like = 2 (L2 - L3),  ball-like = 3 L3
+    # I4 = sum over triangle pairs of w_s w_t (n_s . n_t)^4
 
     name = "paf"
     version = "2"
@@ -139,15 +144,15 @@ class PAFPlanarFamilies(Descriptor):
         ico = trimesh.creation.icosphere(subdivisions=int(p["ico_subdivisions"]))
         dev = resolve_torch_device(self.device)
         if dev is None:
-            # eq.(28): T2 = sum w n n^T
+            # area-weighted average of n n^T (eq. 28)
             T2 = np.einsum("t,ti,tj->ij", w, N, N)
-            # I4 = |T4|_F^2, T4 = sum w n(x)n(x)n(x)n
+            # box-likeness I4 from the 4th-order average
             T4 = np.einsum("t,ti,tj,tk,tl->ijkl", w, N, N, N, N, optimize=True)
             I4 = float((T4 ** 2).sum())
             _, cell = cKDTree(ico.vertices).query(N)
         else:
             T2, I4, cell = _moments_cells_torch(N, w, ico.vertices, dev)
-        # eq.(28): Westin coefficients
+        # rod / plate / ball scores (eq. 28)
         L = np.sort(np.linalg.eigvalsh(T2))[::-1]
         cl, cp, cs = L[0] - L[1], 2.0 * (L[1] - L[2]), 3.0 * L[2]
 
@@ -155,7 +160,7 @@ class PAFPlanarFamilies(Descriptor):
         q = q[q > 0]
         H = float(-(q * np.log(q)).sum() / math.log(len(ico.vertices)))
 
-        # planar faces: no small non-zero fold to a neighbour
+        # flat triangles: no small (curved-surface) fold to any neighbour
         tol_rad = math.radians(float(p["family_tol_deg"]))
         planar = np.ones(len(N), dtype=bool)
         fa = np.asarray(mesh.mesh.face_adjacency)
@@ -168,7 +173,7 @@ class PAFPlanarFamilies(Descriptor):
         order = np.argsort(-mesh.face_areas, kind="stable")
         order = order[planar[order]]
         free = np.ones(len(N), dtype=bool)
-        families = []                                    # (alpha, m, members)
+        families = []                                    # (area share, direction, members)
         for t in order:
             if len(families) >= int(p["max_families"]):
                 break
@@ -193,18 +198,19 @@ class PAFPlanarFamilies(Descriptor):
 # END OF FILE: paf_planar_families.py
 # ==============================================================================
 # SUMMARY:
-#   PAF: Westin/I4/entropy normal moments + 6 largest parallel-plane families.
+#   PAF: overall direction summary + the 6 biggest groups of parallel flat faces.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.paf_planar_families import PAFPlanarFamilies
 #   v = PAFPlanarFamilies().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Entropy H is quantised on a fixed grid (approximately rotation invariant).
-#   - [ ] Family loop is O(F * N_fam) with N_fam <= 64 (Complexity PDF).
+#   - [ ] Direction spread H uses a fixed grid, so it changes very slightly when the part turns.
+#   - [ ] Grouping loop time grows with triangles x groups (at most 64 groups).
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-09-30  v2: empty plane list no longer crashes (np.add.reduceat on an empty array)
-#   2026-10-04  optional GPU path for T2 / T4 / icosphere cells (device = cuda)
+#   2026-09-30  v2: a group with no flat triangles no longer crashes
+#   2026-10-04  optional GPU version (device = cuda)
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

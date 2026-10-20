@@ -3,36 +3,37 @@
 FILE: d4_tetrahedron_volume.py
 ================================================================================
 PURPOSE:
-    D4 random tetrahedron volume (unsigned),
-    CAD_Descriptors_Explained.pdf, Algorithm 4: for S random sample quadruples the
-    volume V = |det[p2-p1, p3-p1, p4-p1]| / 6 (never negative). Output is the
-    histogram of cbrt(V / D_diam^3) plus the skewness of V.
+    D4, volume of random 4-point pyramids (PDF Algorithm 4). Picks many
+    random sets of four surface points and measures the volume of the
+    pyramid (tetrahedron) they form. Flat parts give small volumes, chunky
+    parts give large ones. Output: histogram of the volumes plus one number
+    for how lopsided they are.
 
 INPUTS:
-    - PreparedMesh (default sample pool, centroid, D_diam), seeded rng.
-    - params: bins (32), quadruples S (2e5).
-    - device: "cuda" runs the gather / triple product in torch float64.
+    - PreparedMesh (surface sample points, part size D_diam), seeded rng.
+    - params: bins (32), quadruples (2e5).
+    - device: "cuda" runs the volume maths on the GPU.
 
 OUTPUTS:
-    - float32 vector, shape (bins+1,): [Hellinger hist | gamma_1(V)], gamma_1 of the unsigned volumes.
+    - float32 vector, shape (bins+1,): [volume histogram | skewness of the volumes].
 
 DEPENDENCIES:
     stdlib      : math
-    third-party : numpy, torch (optional, GPU path only)
+    third-party : numpy, torch (optional, GPU only)
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - V = |det[p2-p1, p3-p1, p4-p1]|/6: a volume is never negative, and the
-      absolute value makes D4 invariant to rotation and reflection (v1 kept the
-      sign as handedness and was not mirror invariant).
-    - Histogram range [0, (6 sqrt2)^(-1/3)]: the regular tetrahedron of
-      edge D_diam is the largest.
-    - The CPU and GPU paths use the same indices and float64 maths; they
-      agree to ~1e-15 per volume (tested), so only values that sit exactly
-      on a bin edge could differ.
+    - V = |det[p2-p1, p3-p1, p4-p1]| / 6. The absolute value means a volume
+      is never negative, so a mirrored part gives the same result
+      (version 1 kept the sign and could tell left from right).
+    - The histogram is of cbrt(V / D_diam^3) (cube root, so it behaves like
+      a length). The largest possible pyramid is the regular one with edge
+      D_diam, which sets the top of the range.
+    - CPU and GPU use the same points and float64 maths; they agree to
+      ~1e-15 per volume (tested).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -47,21 +48,21 @@ from src.descriptors.base import (ALL_INVARIANCES, Descriptor, distinct_tuples,
                                   torch_gather)
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-CBRT_VOL_MAX = (6.0 * math.sqrt(2.0)) ** (-1.0 / 3.0)   # [-] upper histogram edge
+CBRT_VOL_MAX = (6.0 * math.sqrt(2.0)) ** (-1.0 / 3.0)   # [-] top of the histogram (regular pyramid)
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _volumes_numpy(P: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    """Volumes of tetrahedra [L^3], shape (S,), all >= 0."""
-    # points: S = 2e5 random quadruples (params.quadruples) drawn from n = 2e4 surface samples (pipeline.n_samples)
+    """Volume of each 4-point pyramid [L^3], shape (S,), all >= 0."""
+    # points used: 2e5 random quadruples (params.quadruples) from the 2e4 surface samples (pipeline.n_samples)
     q = P[idx]                                            # (S, 4, 3)
     e1, e2, e3 = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0], q[:, 3] - q[:, 0]
-    # D4 eq.(9): V = |((p2-p1) x (p3-p1)) . (p4-p1)| / 6
+    # pyramid volume = |(e1 x e2) . e3| / 6 (eq. 9)
     return np.abs(np.einsum("ij,ij->i", np.cross(e1, e2), e3)) / 6.0
 
 
 def _volumes_torch(P: np.ndarray, idx: np.ndarray, dev) -> np.ndarray:
-    """GPU twin of _volumes_numpy (float64)."""
+    """GPU version of _volumes_numpy (float64)."""
     import torch
     q = torch_gather(P, idx, dev)
     e1, e2, e3 = q[:, 1] - q[:, 0], q[:, 2] - q[:, 0], q[:, 3] - q[:, 0]
@@ -71,10 +72,9 @@ def _volumes_torch(P: np.ndarray, idx: np.ndarray, dev) -> np.ndarray:
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class D4TetrahedronVolume(Descriptor):
-    """D4: random tetrahedron volume (unsigned)."""
+    """D4: volumes of random 4-point pyramids (never negative)."""
     # V = |det[p2 - p1, p3 - p1, p4 - p1]| / 6
-    # V^ = V / D_diam^3 in [0, 1/(6 sqrt2)]
-    # F_D4 = [hist32({cbrt V^}; [0, (6 sqrt2)^(-1/3)]), gamma_1({V / sigma_V})]
+    # output = [32-bin histogram of cbrt(V / D_diam^3), skewness of V]
 
     name = "d4"
     version = "2"
@@ -94,7 +94,7 @@ class D4TetrahedronVolume(Descriptor):
             V = _volumes_numpy(P, idx)
         else:
             V = _volumes_torch(P, idx, dev)
-        # D4 eq.(10): hist of cbrt(V / D_diam^3), plus gamma_1(V / sigma_V)
+        # histogram of cube-root volume / part size, plus skewness (eq. 10)
         v_hat = np.cbrt(V / mesh.diameter ** 3)
         h = hellinger_hist(v_hat, self.n_hist, 0.0, CBRT_VOL_MAX)
         return np.append(h, skewness(V))
@@ -103,18 +103,19 @@ class D4TetrahedronVolume(Descriptor):
 # END OF FILE: d4_tetrahedron_volume.py
 # ==============================================================================
 # SUMMARY:
-#   D4 tetrahedron volume histogram + skewness (unsigned volumes) (33 values).
+#   D4: volume histogram of random 4-point pyramids + skewness (33 values).
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.d4_tetrahedron_volume import D4TetrahedronVolume
 #   v = D4TetrahedronVolume(device="cuda").compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Vectorised S x 4 x 3 gather (~80 MB peak at S=2e5); stream in
-#         chunks of 1e4 if memory matters (Complexity PDF).
+#   - [ ] All 2e5 x 4 points are loaded at once (~80 MB peak); process
+#         in chunks of 1e4 if memory matters.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-09-30  v2: unsigned volumes, no handedness; now mirror invariant
-#   2026-10-04  GPU twin uses the shared base.torch_gather
+#   2026-09-30  v2: volumes never negative, so left/right mirror copies match
+#   2026-10-04  GPU version uses the shared base.torch_gather
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

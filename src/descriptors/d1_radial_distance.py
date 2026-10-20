@@ -3,16 +3,16 @@
 FILE: d1_radial_distance.py
 ================================================================================
 PURPOSE:
-    D1 radial distance distribution, CAD_Descriptors_Explained.pdf, Algorithm
-    1: histogram of the distances from the area-weighted surface centroid to
-    the surface samples, scaled by the largest distance.
+    D1, distance from the centre (PDF Algorithm 1). Measures how far each
+    surface point is from the part's centre, divides by the largest such
+    distance, and stores the spread of those values as a histogram.
 
 INPUTS:
-    - PreparedMesh (default sample pool, centroid).
-    - params: bins (PDF: 32).
+    - PreparedMesh (surface sample points, centre).
+    - params: bins (32).
 
 OUTPUTS:
-    - float32 vector, shape (bins,), Hellinger-mapped histogram on [0, 1].
+    - float32 vector, shape (bins,): histogram of the distances on [0, 1].
 
 DEPENDENCIES:
     stdlib      : (none)
@@ -20,13 +20,14 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - d_i = |p_i - c|, d^_i = d_i / max_j d_j. Invariant to translation (c
-      moves with the part), rotation and reflection (norms), scale (ratio).
-    - Reference: sphere -> all mass in the last bin; cube -> support
-      [1/sqrt 3, 1].
+    - d_i = |p_i - c|, divided by the largest d. The centre moves with the
+      part, distances do not change when the part is turned or mirrored,
+      and dividing by the largest distance removes size.
+    - Examples: a sphere puts everything in the last bin; a cube fills
+      [0.58, 1] (0.58 = 1/sqrt 3, centre of a face vs a corner).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -39,10 +40,10 @@ from src.descriptors.base import EPS, Descriptor, DescriptorError, hellinger_his
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class D1RadialDistance(Descriptor):
-    """D1: radial distance distribution."""
-    # c = sum_t A_t b_t / A,  d_i = |p_i - c|,  d^_i = d_i / max_j d_j in [0, 1]
-    # F_D1 = hist32({d^_i}; [0, 1])
-    # points: all n = 2e4 surface samples (pipeline.n_samples)
+    """D1: how far surface points are from the centre."""
+    # c = area-weighted centre of the surface
+    # d_i = |p_i - c| / (largest d), a value in [0, 1]; output = 32-bin histogram of d_i
+    # points used: all 2e4 surface samples (pipeline.n_samples)
 
     name = "d1"
     version = "1"
@@ -53,7 +54,7 @@ class D1RadialDistance(Descriptor):
         self.dim = self.n_hist = int(self.params["bins"])
 
     def _compute(self, mesh, rng: np.random.Generator) -> np.ndarray:
-        # D1 eq.(5): d_i = |p_i - c|, normalised by max_j d_j
+        # distance of each point from the centre, divided by the largest one (eq. 5)
         d = np.linalg.norm(mesh.samples.points - mesh.centroid, axis=1)
         dmax = float(d.max())
         if dmax <= EPS:
@@ -64,15 +65,16 @@ class D1RadialDistance(Descriptor):
 # END OF FILE: d1_radial_distance.py
 # ==============================================================================
 # SUMMARY:
-#   D1 radial distance histogram (32 bins, Hellinger).
+#   D1: 32-bin histogram of distance from the centre.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.d1_radial_distance import D1RadialDistance
 #   v = D1RadialDistance().compute(prepared_mesh, np.random.default_rng(0))
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Blind to direction: rotating one arm about the centre leaves D1 unchanged (by design).
+#   - [ ] Ignores direction: swinging one arm around the centre does not change D1 (by design).
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

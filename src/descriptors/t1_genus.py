@@ -3,16 +3,18 @@
 FILE: t1_genus.py
 ================================================================================
 PURPOSE:
-    T1 genus and body count, CAD_Descriptors_Explained.pdf, Algorithm 11: per
-    connected surface component, Euler characteristic, boundary loops and
-    genus; bodies vs sealed cavities from the sign of each component's
-    enclosed volume.
+    T1, counting pieces, holes and hollows (PDF Algorithm 11). Four counts:
+      - how many separate solid pieces the file holds,
+      - how many through-holes there are (a washer has 1, a plate with
+        4 bolt holes has 4), stored as log(1 + holes),
+      - how many sealed hollow spaces are inside (closed cavities),
+      - how many open boundary loops the surface has (0 for a closed part).
 
 INPUTS:
-    - PreparedMesh (welded mesh with consistent orientation).
+    - PreparedMesh (cleaned mesh with consistent outward normals).
 
 OUTPUTS:
-    - float32 vector, shape (4,): [#bodies, log(1+g), #cavities, sum b_c].
+    - float32 vector, shape (4,): [#pieces, log(1+holes), #hollows, #open loops].
 
 DEPENDENCIES:
     stdlib      : math
@@ -20,15 +22,17 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - chi_c = V_c - E_c + F_c = 2 - 2 g_c - b_c  =>  g_c = (2 - chi_c - b_c)/2
-      (eq. 24), clipped at 0 for non-manifold input.
-    - Components are face sets connected through shared (manifold) edges.
-    - V_c = 1/6 sum x0 . (x1 x x2): > 0 outer skin, < 0 cavity wall. Volumes
-      with |V_c| <= 1e-9 A^(3/2) (open sheets) count as bodies.
-    - Topological counts: invariant under every similarity transform.
+    - Holes come from counting corners (V), edges (E) and triangles (F) of
+      each connected surface: holes = (2 - (V - E + F) - open loops) / 2
+      (eq. 24). Never below 0, even for broken meshes.
+    - A connected surface is a set of triangles joined through shared edges.
+    - Each surface's enclosed volume tells outside skin (positive) from the
+      wall of an inner hollow (negative). Near-zero volumes (open sheets)
+      count as pieces.
+    - Pure counts: moving, turning, mirroring or scaling changes nothing.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -43,13 +47,13 @@ from scipy.sparse.csgraph import connected_components
 from src.descriptors.base import Descriptor
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-VOLUME_TOL = 1e-9        # [-] |V_c| / A^(3/2) below which a component is a sheet
+VOLUME_TOL = 1e-9        # [-] |volume| / area^(3/2) below this means an open sheet
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _components(n: int, pairs: np.ndarray) -> tuple[int, np.ndarray]:
-    """Connected components of an undirected graph on n nodes given edge pairs (E,2)."""
-    # points: none sampled; counts over all welded vertices, edges and faces
+    """Group n items into connected groups, given linked pairs (E,2)."""
+    # points used: none sampled; counts over all mesh corners, edges and triangles
     if len(pairs) == 0:
         return n, np.arange(n)
     g = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
@@ -58,9 +62,9 @@ def _components(n: int, pairs: np.ndarray) -> tuple[int, np.ndarray]:
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class T1Genus(Descriptor):
-    """T1: bodies, genus, cavities, boundary loops."""
-    # chi_c = V_c - E_c + F_c = 2 - 2 g_c - b_c  =>  g_c = (2 - chi_c - b_c) / 2
-    # F_T1 = [#bodies, log(1 + g), #cavities, sum_c b_c],  g = sum_c g_c
+    """T1: pieces, through-holes, hollows, open loops."""
+    # per connected surface: holes = (2 - (V - E + F) - open loops) / 2
+    # output = [#pieces, log(1 + total holes), #hollows, total open loops]
 
     name = "t1"
     version = "1"
@@ -77,7 +81,7 @@ class T1Genus(Descriptor):
         nF = len(F)
         n_comp, comp = _components(nF, np.asarray(tm.face_adjacency))
 
-        # vertices, edges and faces counted per component (1-D integer keys)
+        # count corners, edges and triangles of each connected surface (integer keys)
         nV = np.int64(len(tm.vertices))
         comp = comp.astype(np.int64)
         vkeys = np.unique(np.repeat(comp, 3) * nV + F.ravel())
@@ -88,7 +92,7 @@ class T1Genus(Descriptor):
         ekeys, ecount = np.unique(ekey, return_counts=True)
         Ec = np.bincount(ekeys // (nV * nV), minlength=n_comp)
 
-        # boundary loops: components of the graph of one-sided edges
+        # open loops: chains of edges that have a triangle on one side only
         bkeys = ekeys[ecount == 1]
         bc = np.zeros(n_comp, dtype=np.int64)
         if len(bkeys):
@@ -100,7 +104,7 @@ class T1Genus(Descriptor):
             loop_comp[loop_of[inv.reshape(-1, 2)[:, 0]]] = bcomp
             bc = np.bincount(loop_comp, minlength=n_comp)
 
-        # eq.(24): g_c = (2 - chi_c - b_c) / 2
+        # through-holes per surface (eq. 24)
         chi = Vc - Ec + Fc
         g = np.maximum(0.0, (2 - chi - bc) / 2.0)
 
@@ -109,22 +113,23 @@ class T1Genus(Descriptor):
         Vol = np.bincount(comp, weights=vol, minlength=n_comp)
         tol = VOLUME_TOL * mesh.area ** 1.5
         cavities = int(np.sum(Vol < -tol))
-        # eq.(25): [#bodies, log(1 + g), #cavities, sum b_c]
+        # [#pieces, log(1 + holes), #hollows, #open loops] (eq. 25)
         return np.array([n_comp - cavities, math.log1p(float(g.sum())), cavities, float(bc.sum())])
 
 # ==============================================================================
 # END OF FILE: t1_genus.py
 # ==============================================================================
 # SUMMARY:
-#   T1: [bodies, log(1+genus), cavities, boundary loops] from Euler-Poincare.
+#   T1: [pieces, log(1+holes), hollows, open loops].
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.t1_genus import T1Genus
 #   v = T1Genus().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Non-manifold edges split components; genus is then a lower bound.
+#   - [ ] Edges shared by more than two triangles split surfaces; hole count may then be too low.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

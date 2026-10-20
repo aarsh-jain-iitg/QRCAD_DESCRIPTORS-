@@ -3,18 +3,20 @@
 FILE: lbe_laplace_beltrami.py
 ================================================================================
 PURPOSE:
-    LBE Laplace-Beltrami eigenvalues ("ShapeDNA"),
-    CAD_Descriptors_Explained.pdf, Algorithm 7: the K lowest non-zero
-    eigenvalues of the cotangent Laplacian (generalised with the lumped mass
-    matrix), made scale-free with the surface area and expressed as the log
-    deviation from Weyl's law.
+    LBE, the "sound" of the surface (PDF Algorithm 7, also called ShapeDNA).
+    If the surface were a drum skin, it would vibrate at certain natural
+    frequencies. This file computes the K lowest ones. Two parts with the
+    same frequencies have very similar overall shape.
 
 INPUTS:
-    - PreparedMesh (welded mesh, area), seeded rng (Lanczos start vector).
-    - params: K (30), min_vertices (subdivide coarser meshes up to this).
+    - PreparedMesh (cleaned mesh, surface area), seeded rng (start vector
+      for the solver).
+    - params: K (30), min_vertices (coarser meshes are refined up to this).
 
 OUTPUTS:
-    - float32 vector, shape (K,): log(lambda_k A / (4 pi k)), k = 1..K.
+    - float32 vector, shape (K,): log(lambda_k A / (4 pi k)), k = 1..K,
+      i.e. how far each frequency is from what a typical shape of the same
+      area would give.
 
 DEPENDENCIES:
     stdlib      : logging, math
@@ -22,23 +24,22 @@ DEPENDENCIES:
     internal    : descriptors.base
 
 PHYSICS / DOMAIN CONTEXT:
-    - L_ij = -1/2 (cot a_ij + cot b_ij), M lumped mass (eq. 14);
-      L phi = lambda M phi (eq. 15); lambda^ = lambda A (scale-free).
-    - robust_laplacian builds L on the intrinsic Delaunay triangulation (the
-      edge-flip step the PDF asks for, so cotangent weights are >= 0) and
-      handles non-manifold input via a tufted cover. Its lumped mass is
-      barycentric (A_t/3 per corner) rather than the mixed-Voronoi cell of
-      eq. (14); both converge to the same spectrum under refinement.
-    - One zero eigenvalue per connected body is dropped (beta_0 = number of
-      connected components of the vertex graph).
-    - Coarse CAD meshes (a box has 8 vertices) cannot resolve 30 modes, so
-      they are midpoint-subdivided until V >= min_vertices. Subdivision
-      does not change the geometry, only the discretisation.
-    - Intrinsic quantity: invariant to rotation, shift, reflection; lambda A
-      removes scale.
+    - Builds a "stiffness" matrix L and a "mass" matrix M from the mesh
+      (eq. 14) and solves L phi = lambda M phi (eq. 15). Multiplying lambda
+      by the area A removes size.
+    - robust_laplacian builds these matrices in a way that also works on
+      imperfect meshes. Its mass matrix gives each corner 1/3 of each
+      triangle's area, a slightly simpler choice than the PDF's; both give
+      the same answer on fine meshes.
+    - Each separate solid piece adds one zero frequency; those are dropped.
+    - Coarse CAD meshes (a box has 8 corners) cannot show 30 frequencies,
+      so their triangles are split into smaller ones until there are at
+      least min_vertices corners. This does not change the shape.
+    - Depends only on the surface itself, so moving, turning or mirroring
+      the part changes nothing.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -56,20 +57,20 @@ from scipy.sparse.linalg import eigsh
 from src.descriptors.base import Descriptor, DescriptorError
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-SHIFT = -1e-8               # [-] shift-invert sigma (PDF Algorithm 7)
-MAX_SUBDIVISIONS = 8        # [-] cap on 4x midpoint refinements
-LAMBDA_FLOOR = 1e-12        # [-] floor before the log for numerically zero modes
+SHIFT = -1e-8               # [-] solver looks for frequencies closest to this value (just below 0)
+MAX_SUBDIVISIONS = 8        # [-] at most 8 rounds of splitting each triangle into 4
+LAMBDA_FLOOR = 1e-12        # [-] smallest value allowed before taking the log
 
 logger = logging.getLogger(__name__)
 
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class LBELaplaceBeltrami(Descriptor):
-    """LBE: Laplace-Beltrami spectrum, Weyl-normalised."""
-    # L_ij = -(cot a_ij + cot b_ij) / 2,  L_ii = -sum_{j != i} L_ij,  M = diag(A~_i)
-    # L phi_k = lambda_k M phi_k,  0 = lambda_0 <= lambda_1 <= ...,  lambda^_k = lambda_k A
-    # F_LBE = [log(lambda^_k / (4 pi k))]_{k=1..30}
-    # points: all welded mesh vertices (subdivided up to >= 1000, params.min_vertices)
+    """LBE: lowest natural frequencies of the surface, compared to a typical shape."""
+    # L = stiffness matrix (from the mesh angles), M = mass matrix (area per corner)
+    # solve L phi_k = lambda_k M phi_k for the lowest lambda_k, then multiply by area A
+    # output = [log(lambda_k A / (4 pi k))] for k = 1..30
+    # points used: all mesh corners (refined up to >= 1000, params.min_vertices)
 
     name = "lbe"
     version = "1"
@@ -94,7 +95,7 @@ class LBELaplaceBeltrami(Descriptor):
         if len(V) <= k + 1:
             raise DescriptorError(f"lbe: {len(V)} vertices cannot give {K} eigenvalues")
         v0 = rng.standard_normal(len(V))
-        # eq.(15): L phi = lambda M phi, shift-invert Lanczos near 0
+        # lowest frequencies of L phi = lambda M phi (eq. 15)
         lam = eigsh(L, k=k, M=M, sigma=SHIFT, which="LM", v0=v0,
                     return_eigenvectors=False)
         lam = np.sort(lam)[beta0:]
@@ -102,24 +103,25 @@ class LBELaplaceBeltrami(Descriptor):
             logger.warning("lbe: %d numerically zero modes past beta_0=%d",
                            int(np.sum(lam <= LAMBDA_FLOOR)), beta0)
         ks = np.arange(1, K + 1)
-        # eq.(16): F = log(lambda_k A / (4 pi k))
+        # compare to a typical shape of the same area, on a log scale (eq. 16)
         return np.log(np.maximum(lam, LAMBDA_FLOOR) * mesh.area / (4.0 * math.pi * ks))
 
 # ==============================================================================
 # END OF FILE: lbe_laplace_beltrami.py
 # ==============================================================================
 # SUMMARY:
-#   LBE: 30 Weyl-normalised log Laplace-Beltrami eigenvalues.
+#   LBE: 30 lowest natural frequencies of the surface (log, size-free).
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.lbe_laplace_beltrami import LBELaplaceBeltrami
 #   v = LBELaplaceBeltrami().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] No decimation to a vertex budget: cost grows ~V^1.3 (Complexity
-#         PDF); very fine meshes may hit the per-file timeout.
-#   - [ ] Blind to mirror-undoable differences, e.g. boss vs pocket.
+#   - [ ] No limit on mesh size: time grows faster than the corner count
+#         (~V^1.3); very fine meshes may hit the per-file timeout.
+#   - [ ] Cannot tell a bump from a matching dent (boss vs pocket).
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

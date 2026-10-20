@@ -3,15 +3,14 @@
 FILE: base.py
 ================================================================================
 PURPOSE:
-    Abstract Descriptor interface shared by all fifteen shape descriptors, plus
-    the small numeric helpers they all need (Hellinger histograms, distinct
-    random index tuples, safe normalisation, optional torch device math and
-    the GPU gather of index tuples).
-    Keeping these here means every descriptor file contains only its own math.
+    The common parent class for all fifteen shape descriptors, plus the small
+    number helpers they share: histograms, drawing random groups of points,
+    skewness, and the optional GPU helpers.
+    Keeping these here means each descriptor file holds only its own idea.
 
 INPUTS:
-    - Descriptor params (dict) from [descriptors.<name>] in config.toml.
-    - PreparedMesh (src/preprocessing.py) and a seeded np.random.Generator.
+    - Descriptor settings (dict) from [descriptors.<name>] in config.toml.
+    - PreparedMesh (src/preprocessing.py) and a seeded random generator.
 
 OUTPUTS:
     - Descriptor.compute(...) -> np.ndarray float32, shape (dim,).
@@ -22,13 +21,15 @@ DEPENDENCIES:
     internal    : preprocessing (type only)
 
 PHYSICS / DOMAIN CONTEXT:
-    - Every vector is dimensionless (lengths / D_diam, areas / D_diam^2, ...),
-      see CAD_Descriptors_Explained.pdf.
-    - Histogram blocks are L1-normalised then square-rooted (Hellinger map),
-      so the inner product of two blocks is the Bhattacharyya similarity.
+    - Every output has no units: lengths are divided by the part size D_diam,
+      areas by D_diam^2, and so on. A part and its scaled copy give the same
+      vector.
+    - Histograms are scaled to sum to 1, then square-rooted. With that, the
+      dot product of two histograms measures how much they overlap
+      (1 = identical, 0 = no overlap).
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-10-04
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -44,36 +45,36 @@ if TYPE_CHECKING:
     from src.preprocessing import PreparedMesh
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
-EPS = 1e-12                     # [-] guard for divisions by norms / masses
+EPS = 1e-12                     # [-] smallest value we are willing to divide by
 ALL_INVARIANCES = frozenset({"translation", "rotation", "scale", "reflection"})
 
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def angle_between_lines_deg(a: np.ndarray, b: np.ndarray) -> float:
-    """Angle between two undirected lines [deg], in [0, 90]."""
+    """Angle between two lines (direction sign ignored) [deg], in [0, 90]."""
     c = min(1.0, abs(float(np.dot(a, b))))
     return math.degrees(math.acos(c))
 
 
 def distinct_tuples(rng: np.random.Generator, n: int, S: int, k: int) -> np.ndarray:
     """
-    Draw S index k-tuples from range(n) and drop tuples with repeated entries.
+    Pick S random groups of k point indices, dropping groups that repeat a point.
 
     Parameters
     ----------
     rng : np.random.Generator
         Seeded generator.
     n : int
-        Pool size. Must be >= k.
+        Number of points to pick from. Must be >= k.
     S : int
-        Number of tuples to draw.
+        Number of groups to draw.
     k : int
-        Tuple length (2 pairs, 3 triples, 4 quadruples).
+        Group size (2 pairs, 3 triples, 4 quadruples).
 
     Returns
     -------
     np.ndarray, shape (S', k), int64
-        S' <= S tuples with pairwise distinct entries (collision rate ~k^2/2n).
+        S' <= S groups with no repeated point (about k^2/2n of them are dropped).
     """
     if n < k:
         raise DescriptorError(f"need at least {k} surface samples, got {n}")
@@ -88,23 +89,25 @@ def distinct_tuples(rng: np.random.Generator, n: int, S: int, k: int) -> np.ndar
 def hellinger_hist(values: np.ndarray, bins: int, lo: float, hi: float,
                    weights: np.ndarray | None = None) -> np.ndarray:
     """
-    Histogram on [lo, hi] (values clipped into range), L1-normalised, sqrt-mapped.
+    Histogram on [lo, hi], scaled to sum 1, then square-rooted.
+
+    Values outside the range are pushed into the first or last bin.
 
     Parameters
     ----------
     values : np.ndarray, shape (N,)
-        Dimensionless samples.
+        Unitless values.
     bins : int
         Number of equal-width bins.
     lo, hi : float
         Histogram range.
     weights : np.ndarray, shape (N,), optional
-        Non-negative sample weights.
+        Non-negative weight of each value.
 
     Returns
     -------
     np.ndarray, shape (bins,), float64
-        sqrt(h / sum h); all zeros if the total mass is zero.
+        sqrt(h / sum h); all zeros if the histogram is empty.
     """
     v = np.clip(values, lo, hi)
     h, _ = np.histogram(v, bins=bins, range=(lo, hi), weights=weights)
@@ -112,7 +115,7 @@ def hellinger_hist(values: np.ndarray, bins: int, lo: float, hi: float,
 
 
 def hellinger(h: np.ndarray) -> np.ndarray:
-    """L1-normalise a non-negative array and apply sqrt (zeros stay zeros)."""
+    """Scale a non-negative array to sum 1 and take the square root (zeros stay zeros)."""
     h = np.asarray(h, dtype=np.float64)
     s = h.sum()
     return np.sqrt(h / s) if s > EPS else np.zeros_like(h)
@@ -120,9 +123,9 @@ def hellinger(h: np.ndarray) -> np.ndarray:
 
 def resolve_torch_device(device: str) -> Any:
     """
-    Return a torch.device for "cuda", or None for CPU / missing torch.
+    Return a torch GPU device for "cuda", or None to run on the CPU.
 
-    torch is imported lazily so CPU-only runs never pay its import cost.
+    torch is only imported when a GPU is asked for, so CPU runs stay fast to start.
     """
     if device != "cuda":
         return None
@@ -134,7 +137,7 @@ def resolve_torch_device(device: str) -> Any:
 
 
 def skewness(x: np.ndarray) -> float:
-    """Sample skewness gamma_1 = E[(x-mu)^3]/sigma^3; 0 when sigma ~ 0."""
+    """Skewness (lopsidedness) E[(x-mu)^3]/sigma^3; 0 when all values are equal."""
     x = np.asarray(x, dtype=np.float64)
     if x.size < 3:
         return 0.0
@@ -148,12 +151,12 @@ def skewness(x: np.ndarray) -> float:
 def soft_hellinger_hist(values: np.ndarray, bins: int, lo: float, hi: float,
                         weights: np.ndarray | None = None) -> np.ndarray:
     """
-    Linearly interpolated (soft) histogram, L1-normalised and sqrt-mapped.
+    Histogram where each value is shared between its two nearest bins.
 
-    Each value splits its weight between the two nearest bin centres, so a
-    value exactly on a bin edge (a 90 deg CAD crease with 10 deg bins) lands
-    half in each neighbour instead of flipping bins with rounding noise.
-    The histogram is then continuous in the values.
+    A value exactly on a bin edge (a 90 deg CAD corner with 10 deg bins)
+    lands half in each bin, instead of jumping from one bin to the other
+    because of tiny rounding errors. Result is scaled to sum 1 and
+    square-rooted, like hellinger_hist.
 
     Parameters
     ----------
@@ -179,14 +182,14 @@ def soft_hellinger_hist(values: np.ndarray, bins: int, lo: float, hi: float,
 
 def torch_gather(P: np.ndarray, idx: np.ndarray, dev: Any) -> Any:
     """
-    Upload points and gather index tuples on the GPU, in float64.
+    Copy the points to the GPU and look up each index group there, in float64.
 
     Parameters
     ----------
     P : np.ndarray, shape (n, 3)
         Points [L].
     idx : np.ndarray, shape (S, k), int
-        Index tuples (drawn on the CPU so both devices see the same tuples).
+        Index groups (drawn on the CPU so CPU and GPU see the same groups).
     dev : torch.device
 
     Returns
@@ -200,23 +203,23 @@ def torch_gather(P: np.ndarray, idx: np.ndarray, dev: Any) -> Any:
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class DescriptorError(ValueError):
-    """Raised when a mesh cannot produce a valid vector for a descriptor."""
+    """Raised when a mesh cannot give a valid vector for a descriptor."""
 
 
 class Descriptor(ABC):
     """
     One shape descriptor from CAD_Descriptors_Explained.pdf.
 
-    Subclasses set the class attributes, declare ``defaults`` (PDF values),
-    compute ``dim`` in ``_setup`` from their params, and implement ``_compute``.
-    The first ``n_hist`` output dims are Hellinger-mapped histogram values;
-    the remaining dims are raw scalars that the orchestrator z-scores with
-    database statistics.
+    A subclass sets the class attributes and its default settings, works out
+    ``dim`` (output length) in ``_setup``, and does the maths in ``_compute``.
+    The first ``n_hist`` output values are histogram values (scaled and
+    square-rooted); the rest are plain numbers that the orchestrator later
+    standardises using the whole database (subtract mean, divide by std).
     """
 
     name: str = ""
     version: str = "1"
-    metric: str = "hellinger"          # "hellinger" (histogram) | "l2" (z-scored)
+    metric: str = "hellinger"          # "hellinger" (histogram) | "l2" (plain numbers)
     invariances: frozenset[str] = ALL_INVARIANCES
     defaults: dict[str, Any] = {}
 
@@ -230,7 +233,7 @@ class Descriptor(ABC):
             raise TypeError(f"{type(self).__name__} did not set dim")
 
     def _setup(self) -> None:
-        """Derive ``dim`` and ``n_hist`` from ``self.params``."""
+        """Work out ``dim`` and ``n_hist`` from ``self.params``."""
         raise NotImplementedError
 
     @abstractmethod
@@ -239,17 +242,17 @@ class Descriptor(ABC):
 
     def compute(self, mesh: PreparedMesh, rng: np.random.Generator) -> np.ndarray:
         """
-        Compute the descriptor and enforce the output contract.
+        Compute the descriptor and check the result.
 
         Returns
         -------
         np.ndarray, shape (dim,), float32
-            Finite vector.
+            Vector with no NaN or infinite values.
 
         Raises
         ------
         DescriptorError
-            If the mesh is unusable or the result is not finite.
+            If the mesh is unusable or the result has NaN / infinite values.
         """
         v = np.asarray(self._compute(mesh, rng), dtype=np.float64).ravel()
         if v.shape != (self.dim,):
@@ -259,24 +262,25 @@ class Descriptor(ABC):
         return v.astype(np.float32)
 
     def cache_params(self) -> dict[str, Any]:
-        """Params that change the vector (hashed into the cache key)."""
+        """Settings that change the vector (they go into the cache key)."""
         return dict(sorted(self.params.items()))
 
 # ==============================================================================
 # END OF FILE: base.py
 # ==============================================================================
 # SUMMARY:
-#   Abstract Descriptor + shared numeric helpers (Hellinger hist, tuples, skew).
+#   Parent Descriptor class + shared helpers (histograms, random groups, skewness).
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.base import Descriptor, hellinger_hist
 #   class MyDesc(Descriptor): ...
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Tuple drawing is vectorised (Theta(S) memory); stream in chunks if
-#         S grows past ~1e7.
+#   - [ ] All random groups are drawn at once (memory grows with S); draw them
+#         in chunks if S grows past ~1e7.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
-#   2026-10-04  torch_gather: shared GPU gather for the tuple descriptors
+#   2026-10-04  torch_gather: shared GPU lookup for the point-group descriptors
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================

@@ -3,21 +3,25 @@
 FILE: phd_persistent_homology.py
 ================================================================================
 PURPOSE:
-    PHD persistent homology of the radial sweep,
-    CAD_Descriptors_Explained.pdf, Algorithm 12: lower-star filtration of the
-    welded mesh by distance to the symmetry axis, extended persistence
-    (GUDHI), three 5x5 persistence images plus two scalars.
+    PHD, growing the part outward from its axis (PDF Algorithm 12).
+    Imagine a cylinder around the turning axis that slowly gets wider, and
+    keep only the surface inside it. As it grows, pieces appear and join
+    and loops form and close. We record when each feature appears and how
+    long it lasts. Long-lasting features are real (a flange, a groove);
+    short ones are noise. The result is turned into three small 5 x 5
+    pictures plus two numbers.
 
 INPUTS:
-    - PreparedMesh (welded mesh, principal axes, D_diam).
+    - PreparedMesh (cleaned mesh, main axes, part size D_diam).
     - params: grid (5), b_max (0.5), p_grid_max (0.25), sigma (0.05),
       p_max (0.1), loop_threshold (0.02), min_persistence (1e-9).
 
 OUTPUTS:
     - float32 vector, shape (3*grid^2 + 2,):
-      [img(PD0) | img(PD1) | img(Ext1) | #loops(p > 0.02) | total persistence].
-      Each image is L1-normalised and sqrt-mapped (the PDF lists PHD images
-      as histogram blocks); an empty diagram gives a zero image.
+      [picture: pieces | picture: loops | picture: through-hole loops |
+       #loops lasting > 0.02 | total lifetime of all features].
+      Each picture is scaled to sum 1 and square-rooted, like a histogram;
+      an empty one is all zeros.
 
 DEPENDENCIES:
     stdlib      : (none)
@@ -25,24 +29,22 @@ DEPENDENCIES:
     internal    : descriptors.base, descriptors.crs_r_ring_profile
 
 PHYSICS / DOMAIN CONTEXT:
-    - f(v) = |(x_v - c) x e_s| / D_diam; edges / triangles take the max of
-      their vertices (lower star).
-    - GUDHI extended_persistence returns [Ordinary, Relative, Extended+,
-      Extended-]. Mapping chosen for the PDF's three diagrams:
-        PD0  = ordinary dim-0 pairs (pieces),
-        PD1  = ordinary + relative dim-1 pairs (loops),
-        Ext1 = extended (+ and -) dim-1 pairs (the 2g through-hole loops).
-      Each pair maps to (b, p) = (min(birth, death), |death - birth|).
-    - I(x,y) = sum w(p) exp(-((x-b)^2+(y-p)^2)/(2 sigma^2)),
-      w(p) = min(1, p/p_max) (eq. 26). sigma, p_max and the grid extent are
-      not given in the PDF; chosen: b in [0, 0.5] (max radius about an
-      axis through the centroid ~ D_diam/2), p in [0, 0.25], sigma = one
-      grid cell (0.05 in p), p_max = 0.1.
-    - Stability: bottleneck distance <= |f - g|_inf, so mesh noise delta moves
-      the diagram by at most delta.
+    - Each corner's "time" = its distance from the turning axis / D_diam;
+      an edge or triangle appears when its last corner does.
+    - GUDHI tracks the features and returns four lists. We use them as:
+        pieces            = first list, separate pieces,
+        loops             = first + second lists, loops,
+        through-hole loops = third + fourth lists, loops that go round a hole.
+      Each feature becomes (start time, lifetime).
+    - Each picture places a soft blob at every feature's (start, lifetime),
+      bigger for longer-lived ones (eq. 26). Blob size, weights and picture
+      range are our choices (not in the PDF): start in [0, 0.5], lifetime in
+      [0, 0.25], blob width 0.05, full weight from lifetime 0.1 up.
+    - Stable: moving the mesh points by a small amount moves every feature
+      by at most that amount.
 
 AUTHOR: Aarsh Jain
-LAST MODIFIED: 2026-09-23
+LAST MODIFIED: 2026-10-21
 ================================================================================
 """
 
@@ -57,8 +59,8 @@ from src.descriptors.crs_r_ring_profile import axis_distance, symmetry_axis
 
 # ── HELPER / UTILITY FUNCTIONS ────────────────────────────────────────────────
 def _as_bp(pairs: list) -> np.ndarray:
-    """(birth, death) list -> array (n, 2) of (b, p) = (min, |d - b|)."""
-    # points: none sampled; filtration over all welded mesh vertices, edges, faces
+    """List of (start, end) times -> array (n, 2) of (earlier time, lifetime)."""
+    # points used: none sampled; every mesh corner, edge and triangle
     if not pairs:
         return np.zeros((0, 2))
     a = np.asarray([bd for _, bd in pairs], dtype=np.float64)
@@ -68,10 +70,10 @@ def _as_bp(pairs: list) -> np.ndarray:
 
 # ── CORE CLASSES ──────────────────────────────────────────────────────────────
 class PHDPersistentHomology(Descriptor):
-    """PHD: extended persistence images of the radial sweep."""
-    # f(p) = |(p - c) x e_s| / D_diam  (lower-star filtration, extended persistence)
-    # I(x, y) = sum_(b,p) w(p) exp(-((x - b)^2 + (y - p)^2) / (2 sigma^2))
-    # w(p) = min(1, p / p_max),  p = d - b
+    """PHD: pictures of how long shape features last as the part grows from its axis."""
+    # time of a point = distance to turning axis / D_diam
+    # picture(x, y) = sum over features of weight * exp(-((x - start)^2 + (y - life)^2) / (2 sigma^2))
+    # weight = min(1, life / p_max)
 
     name = "phd"
     version = "1"
@@ -84,7 +86,7 @@ class PHDPersistentHomology(Descriptor):
         self.dim = self.n_hist + 2
 
     def _image(self, bp: np.ndarray) -> np.ndarray:
-        """Persistence image eq.(26) on the grid, Hellinger-mapped."""
+        """Turn a feature list into a small picture (eq. 26), scaled and square-rooted."""
         g = int(self.params["grid"])
         xs = (np.arange(g) + 0.5) * float(self.params["b_max"]) / g
         ys = (np.arange(g) + 0.5) * float(self.params["p_grid_max"]) / g
@@ -93,7 +95,7 @@ class PHDPersistentHomology(Descriptor):
         b, p = bp[:, 0], bp[:, 1]
         w = np.minimum(1.0, p / float(self.params["p_max"]))
         s2 = 2.0 * float(self.params["sigma"]) ** 2
-        # eq.(26): I(x, y) = sum w(p) exp(-((x-b)^2 + (y-p)^2) / (2 sigma^2))
+        # one soft blob per feature, weighted by its lifetime (eq. 26)
         gx = np.exp(-(xs[None, :] - b[:, None]) ** 2 / s2)      # (n, g)
         gy = np.exp(-(ys[None, :] - p[:, None]) ** 2 / s2)      # (n, g)
         img = np.einsum("n,nx,ny->xy", w, gx, gy)
@@ -129,16 +131,17 @@ class PHDPersistentHomology(Descriptor):
 # END OF FILE: phd_persistent_homology.py
 # ==============================================================================
 # SUMMARY:
-#   PHD: extended persistence of the radial sweep -> 3 persistence images + 2 scalars.
+#   PHD: 3 small feature pictures + 2 numbers from growing the part out of its axis.
 #
 # USAGE EXAMPLE:
 #   from src.descriptors.phd_persistent_homology import PHDPersistentHomology
 #   v = PHDPersistentHomology().compute(prepared_mesh, rng)
 #
 # KNOWN LIMITATIONS / TODO:
-#   - [ ] Axis inherited from CRS-R: undefined for isotropic covariance.
-#   - [ ] Worst-case O(n_s^3) reduction (not seen on mesh filtrations).
+#   - [ ] Uses the CRS-R axis: no single axis for cube- or sphere-like parts.
+#   - [ ] Worst case is very slow (cube of the mesh size); not seen on real meshes.
 #
 # CHANGELOG:
 #   2026-09-23  Initial implementation
+#   2026-10-21  Plain-language comments and docstrings (no code change)
 # ==============================================================================
