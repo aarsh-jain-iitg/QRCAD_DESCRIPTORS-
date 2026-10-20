@@ -1,15 +1,47 @@
 # QRCAD: 15-Descriptor CAD Retrieval Pipeline
 
 ## What This Does
-Training-free shape retrieval for STL triangle meshes. Every part is turned into
-fifteen space-invariant descriptor blocks (781 numbers) defined in
-`DOCS/CAD_Descriptors_Explained.pdf`: point-set statistics (D1, D2, A3/D3, D4),
-normal-based spectra (SHPS, NCF), the Laplace–Beltrami spectrum (LBE), edge and
-curvature histograms (DAD, SI/CV), and CAD-specific blocks (CRS-R, T1 genus,
-persistent homology PHD, CRS-A, planar families PAF, wall thickness MTS). Blocks
-are fused into one vector and searched with FAISS. Vectors are cached per file
-content, so re-runs only recompute new or changed files. Every result lists which
-descriptors drove the match.
+Finds similar parts in a folder of STL files, with no machine learning or
+training. Each part is measured in fifteen different ways (the "descriptors",
+781 numbers in total, defined in `DOCS/CAD_Descriptors_Explained.pdf`). The
+numbers are joined into one list per part, and the parts whose lists are
+closest to the query come back first (search via FAISS). Results are saved per
+file, so a re-run only measures new or changed files. Every result shows which
+descriptors made the match.
+
+## The 15 Descriptors, in Plain Words
+Every measurement gives the same answer if the part is moved, turned, mirrored
+or scaled, so only the shape counts. "Size" below means the part's overall size.
+The example pairs are in `testing files/` (A vs B): each pair differs in the
+one way that descriptor is built to notice.
+
+| # | Name | What it measures | Good at telling apart | Example pair |
+|---|---|---|---|---|
+| 1 | D1 | How far each surface point is from the part's centre | Round vs boxy | R01 ball vs cube |
+| 2 | D2 | Distance between many random pairs of surface points | Overall spread and proportions | R02 spider, arms at 90° vs paired |
+| 3 | Triangle (A3 + D3) | Angle and size of triangles made from random point triples | Straight vs bent, slender vs stubby | R03 straight vs bowed pin |
+| 4 | D4 | Volume of pyramids made from random groups of four points | Flat vs bulky (does the part leave a plane?) | R04alt flat vs cambered strip |
+| 5 | SHPS | Which directions the surfaces face, and how regular that pattern is | Plain vs grooved, boxy vs smooth | R05 plain vs V-grooved knob |
+| 6 | NCF | Whether near and far surface points face the same way | Solid vs hollow, thin plates | R06 solid vs hollow cube |
+| 7 | LBE | The part's natural "ringing" frequencies, as if the surface were a drum | Overall form, slots and openings | R07 plain vs slotted plate |
+| 8 | DAD | Sharp edges: their angle (inside or outside corner) and total length | Sharp vs chamfered or rounded edges | R08 sharp vs chamfered block |
+| 9 | Curvature | At each point: dome, saddle or dent, and how tightly it curves | Bulging out vs dished in | R09 crown vs dish plate |
+| 10 | CRS-R | Distance of the surface from the part's main axes | Turned parts: each diameter shows as a peak | R10 concentric vs eccentric shaft |
+| 11 | T1 | Counts: separate pieces, through-holes, sealed hollows, open edges | Through-holes vs blind holes | R11 4 through vs 4 blind holes |
+| 12 | PHD | Grows a cylinder out from the axis and records when rings and holes appear and how long they last | Where features sit radially | R12 bolt circle at R25 vs R35 |
+| 13 | CRS-A | Repeating patterns around the axis (teeth, bolt holes) | 6 equal holes vs 6 grouped holes, gear tooth counts | R13 equal vs grouped holes |
+| 14 | PAF | Groups of parallel flat faces: how many levels, how evenly spaced | Coplanar vs stepped faces | R14 coplanar vs stepped feet |
+| 15 | MTS | Wall thickness, by shooting short rays into the material | Thin vs thick walls, shells | R15 dome cover 1 mm vs 2 mm |
+
+Some of these have known weak spots:
+- D1–D4 and NCF use random points, so they change very slightly from run to
+  run. The random seed is fixed, so the same file always gives the same numbers.
+- CRS-R, PHD and CRS-A need a clear main axis. For parts that are equally spread
+  in every direction (cube, sphere) the axis choice is arbitrary.
+- Curvature cannot see curves on coarse meshes whose triangles are wider than
+  2 % of the part size; they read as flat.
+- More detail (formulas, settings, design choices) is in each file's header in
+  `src/descriptors/` and in `CLAUDE.md`.
 
 ## Setup
 ```bash
@@ -158,3 +190,4 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-10-04 | Added `generate_ss.py`: batch per-descriptor PNGs, part renders, A/B cosine / change / re-seed noise for the descriptor-alignment deck |
 | 2026-10-15 | Added `cosine_table.py` (double-clickable A/B cosine table per descriptor); regenerated `outputs/descriptor_ss` with the current descriptors |
 | 2026-10-21 | Descriptors: plain-language comments and docstrings in all 15 descriptor files + `base.py` / `__init__.py` (no code change, AST-identical). `SENDING/` and `SENDING.zip` removed from the repo (kept locally, git-ignored) |
+| 2026-10-21 | README: plain-language "What This Does" and a new "The 15 Descriptors, in Plain Words" table (what each measures, what it tells apart, example test pair) |
