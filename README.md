@@ -119,60 +119,43 @@ Writes `outputs/descriptor_ss/<pair>/<stl>/d<NN>_<name>.png` (one white-backgrou
 A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search.
 
 ## File Map
-| File | Purpose |
+| File | What it does |
 |---|---|
-| `main.py` | Entry point: build/refresh cache → query → table + HTML/PNG/JSON (+ `--eval`) |
-| `src/config.toml` | User settings; descriptor defaults = PDF values |
-| `src/config.py` | tomllib loader, strict validation → `Config` |
-| `src/preprocessing.py` | STL → `PreparedMesh`: normalise, weld, repair, samples, D∅, axes |
-| `src/descriptors/base.py` | `Descriptor` ABC, Hellinger histograms, tuple sampling |
-| `src/descriptors/__init__.py` | Registry name → class (PDF ladder order) |
-| `src/descriptors/d1_radial_distance.py` | D1 |
-| `src/descriptors/d2_pairwise_distance.py` | D2 |
-| `src/descriptors/triangle_a3_d3.py` | A3 + D3 |
-| `src/descriptors/d4_tetrahedron_volume.py` | D4 (unsigned volumes), optional GPU path |
-| `src/descriptors/shps_orientation_spectrum.py` | SHPS |
-| `src/descriptors/ncf_normal_correlation.py` | NCF |
-| `src/descriptors/lbe_laplace_beltrami.py` | LBE / ShapeDNA |
-| `src/descriptors/dad_dihedral_angle.py` | DAD |
-| `src/descriptors/curvature_shape_index.py` | Shape index + curvedness |
-| `src/descriptors/crs_r_ring_profile.py` | CRS-R + shared axis rule |
-| `src/descriptors/t1_genus.py` | T1 genus / bodies / cavities |
-| `src/descriptors/phd_persistent_homology.py` | PHD extended persistence |
-| `src/descriptors/crs_a_angular_spectrum.py` | CRS-A |
-| `src/descriptors/paf_planar_families.py` | PAF |
-| `src/descriptors/mts_wall_thickness.py` | MTS shape-diameter function |
-| `testing.py` | Compute selected descriptors (1..15) for one STL; scrollable report page served from memory (no files) |
-| `generate_ss.py` | Batch `testing.py` for slides: per-descriptor PNGs + part pictures + A-vs-B metrics for every pair in `testing files` |
-| `cosine_table.py` | Static HTML table from `generate_ss.py` output: rows = A/B pairs (part pictures), columns = 15 descriptors, cells = cosine(A, B) |
-| `src/cache.py` | Content-addressed incremental vector cache (atomic writes) |
-| `src/orchestrator.py` | build / query / evaluate, process pool, fusion |
-| `src/database/__init__.py` | `VectorStore` ABC + backend factory |
-| `src/database/numpy_store.py` | Brute-force NumPy backend |
-| `src/database/faiss_store.py` | FAISS flat (exact) and HNSW backends |
-| `src/compression/__init__.py` | `Compressor` ABC, identity and PCA |
-| `src/report.py` | Terminal table, report.html, results.png, results.json |
-| `src/sample_dataset.py` | Synthetic sample dataset generator |
-| `tests/conftest.py` | Shared fixtures (fast params, transforms, config factory) |
-| `tests/test_descriptors.py` | Contract, invariance, determinism, degenerate inputs, PDF reference values |
-| `tests/test_infrastructure.py` | Config, cache invalidation, backends, compression, end-to-end |
-| `dataset/README.md` | Dataset folder convention |
-| `CLAUDE.md` | Architecture, descriptor table, cache keys, extension guide, limitations |
+| `main.py` | Run from the command line: update the saved results, search for one part, write the report (`--eval` also scores the search) |
+| `app.py`, `static/index.html` | Web app: upload parts, search, see why parts match |
+| `src/config.toml` | All settings (which datasets, search method, every descriptor setting) |
+| `src/config.py` | Reads the settings and stops with a clear message if one is wrong |
+| `src/preprocessing.py` | Loads an STL and cleans it up (fixes gaps, picks surface points, finds size and main axes) |
+| `src/descriptors/` | One file per descriptor, named after it (e.g. `d1_radial_distance.py`, `mts_wall_thickness.py`); see the table above |
+| `src/descriptors/base.py` | Shared parent class and helpers for all descriptors |
+| `src/descriptors/__init__.py` | List of all 15 descriptors, in order |
+| `src/cache.py` | Saves each part's numbers so unchanged files are never measured twice |
+| `src/orchestrator.py` | Runs everything: measures parts in parallel, joins the numbers, searches |
+| `src/database/` | Search engines: plain NumPy, or FAISS (exact or fast-approximate) |
+| `src/compression/` | Optional shrinking of the number list (PCA) |
+| `src/report.py` | Writes the results table, `report.html` (3D views), `results.png` and `results.json` |
+| `src/sample_dataset.py` | Makes a small made-up dataset when `dataset/` is empty |
+| `testing.py` | Look at the descriptors of one STL in detail, with plots |
+| `generate_ss.py` | Makes slide pictures for every A/B pair in `testing files/` |
+| `cosine_table.py` | Builds one HTML table: how similar A and B are, per descriptor |
+| `tests/` | Automatic checks: descriptors give the same answer after moving / turning / scaling a part, saving and searching work |
+| `dataset/README.md` | How to lay out the dataset folder |
+| `CLAUDE.md` | Developer notes: design, settings, known limits, how to add a descriptor |
 
-## Physics / Domain Assumptions
-- Input is an STL triangle mesh in any length unit; every descriptor is dimensionless
-  (lengths / D∅, areas / D∅² or A, curvature × √A), so translation, rotation and
-  scale drop out; all blocks are also mirror invariant.
-- Surfaces are sampled uniformly by area (PDF eq. 2), n = 2·10⁴, seeded: the same
-  file + config gives a bit-identical vector.
-- Normals are assumed outward after repair (`fix_normals(multibody=False)` keeps
-  sealed-cavity walls inward for T1).
-- Histogram blocks are compared with the Bhattacharyya similarity (Hellinger map);
-  scalar blocks are z-scored with database statistics (PDF eq. 31).
-- Axis-based blocks (CRS-R, PHD, CRS-A) need a distinguishable symmetry axis; for
-  parts with isotropic covariance (cube, sphere) the axis choice is arbitrary.
-- Curvature needs facets finer than 0.02·D∅; coarser tessellations read as flat.
-- GPU: measured no gain at PDF sizes, so `device = "auto"` runs on CPU (see CLAUDE.md).
+## Assumptions
+- Input is an STL file in any unit (mm, inch, ...). All measurements are
+  divided by the part's size, so moving, turning, mirroring or scaling a part
+  never changes its numbers.
+- Each part is measured on 20,000 points spread evenly over its surface. The
+  random choice is fixed, so the same file and settings always give exactly the
+  same numbers.
+- After cleanup, surface directions are assumed to point outward (the walls of
+  sealed inner hollows point inward, which is how T1 counts them).
+- When two parts are compared, every descriptor counts fairly: histograms are
+  compared by how much they overlap, and plain numbers are first rescaled
+  against the whole dataset so no single descriptor dominates.
+- The known weak spots are listed under the descriptor table above.
+- A GPU gave no speed-up in tests, so everything runs on the CPU by default.
 
 ## Changelog
 | Date | Change |
@@ -191,3 +174,4 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-10-15 | Added `cosine_table.py` (double-clickable A/B cosine table per descriptor); regenerated `outputs/descriptor_ss` with the current descriptors |
 | 2026-10-21 | Descriptors: plain-language comments and docstrings in all 15 descriptor files + `base.py` / `__init__.py` (no code change, AST-identical). `SENDING/` and `SENDING.zip` removed from the repo (kept locally, git-ignored) |
 | 2026-10-21 | README: plain-language "What This Does" and a new "The 15 Descriptors, in Plain Words" table (what each measures, what it tells apart, example test pair) |
+| 2026-10-21 | README: File Map and Assumptions (was Physics / Domain Assumptions) rewritten in plain language |
