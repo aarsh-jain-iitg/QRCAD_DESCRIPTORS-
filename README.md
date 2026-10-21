@@ -119,7 +119,7 @@ Writes `outputs/descriptor_ss/<pair>/<stl>/d<NN>_<name>.png` (one white-backgrou
 A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search.
 
 ## File Map
-| File | What it does |
+| File | Purpose |
 |---|---|
 | `main.py` | Run from the command line: update the saved results, search for one part, write the report (`--eval` also scores the search) |
 | `app.py`, `static/index.html` | Web app: upload parts, search, see why parts match |
@@ -142,7 +142,7 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | `dataset/README.md` | How to lay out the dataset folder |
 | `CLAUDE.md` | Developer notes: design, settings, known limits, how to add a descriptor |
 
-## Assumptions
+## Physics / Domain Assumptions
 - Input is an STL file in any unit (mm, inch, ...). All measurements are
   divided by the part's size, so moving, turning, mirroring or scaling a part
   never changes its numbers.
@@ -174,4 +174,4 @@ A warm single-process query costs ≈0.5–2 s of extraction and ~1 ms of search
 | 2026-10-15 | Added `cosine_table.py` (double-clickable A/B cosine table per descriptor); regenerated `outputs/descriptor_ss` with the current descriptors |
 | 2026-10-21 | Descriptors: plain-language comments and docstrings in all 15 descriptor files + `base.py` / `__init__.py` (no code change, AST-identical). `SENDING/` and `SENDING.zip` removed from the repo (kept locally, git-ignored) |
 | 2026-10-21 | README: plain-language "What This Does" and a new "The 15 Descriptors, in Plain Words" table (what each measures, what it tells apart, example test pair) |
-| 2026-10-21 | README: File Map and Assumptions (was Physics / Domain Assumptions) rewritten in plain language |
+| 2026-10-21 | README: File Map and Physics / Domain Assumptions rewritten in plain language |
